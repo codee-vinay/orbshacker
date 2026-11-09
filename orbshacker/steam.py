@@ -194,8 +194,18 @@ _STAGED_DEPOT_TEMPLATE = '''
 \t\t}}'''
 
 
+def manifest_path(appid: int, steam_path: Path) -> Path:
+    """Return the appmanifest path Steam uses for *appid* under *steam_path*."""
+    return steam_path / "steamapps" / f"appmanifest_{appid}.acf"
+
+
 def generate_appmanifest(appid: int, name: str, installdir: str, steam_path: Path, depot_id: str | None = None) -> Path | None:
-    """Generate a realistic appmanifest_<appid>.acf (StateFlags 1026)."""
+    """Create a new appmanifest_<appid>.acf, never replacing an existing one.
+
+    Exclusive creation (``"x"``) is the guard: it fails atomically if the
+    file appeared after any caller-side check, so a genuine Steam manifest
+    is never truncated, overwritten, or registered for cleanup.
+    """
     acf_content = _ACF_TEMPLATE.format(
         appid=appid,
         launcher=str(steam_path / "steam.exe").replace("/", "\\\\"),
@@ -204,16 +214,28 @@ def generate_appmanifest(appid: int, name: str, installdir: str, steam_path: Pat
         owner=get_steam_user_id(),
         staged=_STAGED_DEPOT_TEMPLATE.format(depot_id=depot_id) if depot_id else "",
     )
-    acf_path = steam_path / "steamapps" / f"appmanifest_{appid}.acf"
+    acf_path = manifest_path(appid, steam_path)
+    created_here = False
     try:
         acf_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(acf_path, "w", encoding="utf-8") as f:
+        with open(acf_path, "x", encoding="utf-8") as f:
+            created_here = True
             f.write(acf_content)
-        print_color(f"[OK] Created appmanifest: {acf_path}", Colors.GREEN, bold=True)
-        return acf_path
+    except FileExistsError:
+        print_color(f"[!] AppManifest already exists: {acf_path}", Colors.YELLOW)
+        print_color("[!] Refusing to overwrite it. No changes were made.", Colors.YELLOW)
+        return None
     except Exception as e:
+        if created_here:
+            try:
+                acf_path.unlink()
+            except OSError:
+                print_color(f"[!] Could not remove incomplete manifest: {acf_path}", Colors.YELLOW)
         print_color(f"[ERROR] Failed to write appmanifest: {e}", Colors.RED, bold=True)
         return None
+
+    print_color(f"[OK] Created appmanifest: {acf_path}", Colors.GREEN, bold=True)
+    return acf_path
 
 
 # ── Interactive UI for Steam Quest Mode ───────────────────────────────────────
@@ -318,9 +340,18 @@ def steam_quest_mode(faker: GameFaker) -> None:
     exe_full_path = f"{info['installdir']}/{info['executable']}"
     fake_exe_path = steam_path / "steamapps" / "common" / exe_full_path.replace("/", os.sep)
 
+    acf_path = manifest_path(appid, steam_path)
     print(f"\n{Colors.BOLD}Summary:{Colors.RESET}")
-    print(f"  AppManifest: {Colors.GRAY}{steam_path / 'steamapps' / f'appmanifest_{appid}.acf'}{Colors.RESET}")
+    print(f"  AppManifest: {Colors.GRAY}{acf_path}{Colors.RESET}")
     print(f"  Fake exe:    {Colors.GRAY}{fake_exe_path}{Colors.RESET}")
+
+    if acf_path.exists():
+        print_color("\n[!] A manifest for this AppID already exists:", Colors.YELLOW)
+        print_color(f"    {acf_path}", Colors.GRAY)
+        print_color("[!] It will NOT be overwritten or deleted by orbshacker.", Colors.YELLOW)
+        print_color("[*] Choose a different AppID, or remove that file yourself if it is unused.", Colors.GRAY)
+        time.sleep(config.SLEEP_LONG)
+        return
 
     if not ask_confirm():
         print_color("\n[!] Operation cancelled.", Colors.YELLOW)
