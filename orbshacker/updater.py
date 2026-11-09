@@ -11,6 +11,7 @@ running executable.
 
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -40,6 +41,16 @@ _CHECKSUM_RE = re.compile(r"[0-9a-fA-F]{64}")
 _MIN_EXECUTABLE_BYTES = 1024
 
 
+def _log_cleanup_success(path: Path) -> None:
+    """Log a successful cleanup of a leftover backup."""
+    _log.info("Successfully cleaned up leftover backup %s", path)
+
+
+def _log_cleanup_failure(path: Path, exc: OSError) -> None:
+    """Log a failure to cleanup a leftover backup."""
+    _log.warning("Could not remove leftover backup %s: %s", path, exc)
+
+
 def _delete_quietly(path: Path) -> None:
     """Remove a temporary file, ignoring cleanup failures."""
     try:
@@ -49,12 +60,18 @@ def _delete_quietly(path: Path) -> None:
 
 
 def _cleanup_old_exe(old_exe: Path) -> None:
-    """Delete a leftover backup executable if it exists."""
-    if old_exe.exists():
-        try:
-            old_exe.unlink()
-        except OSError:
-            pass
+    """Remove a leftover backup executable if it exists.
+
+    Logs at INFO on success, WARNING on failure. Does not raise; the caller
+    decides whether to proceed or abort.
+    """
+    if not old_exe.exists():
+        return
+    try:
+        old_exe.unlink()
+        _log_cleanup_success(old_exe)
+    except OSError as exc:
+        _log_cleanup_failure(old_exe, exc)
 
 
 def is_frozen() -> bool:
@@ -155,6 +172,45 @@ def _download_file(url: str, dest: Path) -> None:
         raise UpdateError(
             f"incomplete download: server declared {expected_length} bytes, received {written}"
         )
+
+
+def _stage_exe_in_install_dir(new_exe: Path, exe_dir: Path) -> Path:
+    """Copy ``new_exe`` into a staging file inside ``exe_dir``.
+
+    The staging file is created with exclusive access so that concurrent
+    updates do not collide. Returns the path of the staging file.
+
+    Raises :class:`UpdateError` if the copy or staging fails.
+    """
+    # Use a name that includes the process ID so concurrent updaters get
+    # different staging files.
+    stage_name = f"orbshacker_update_{os.getpid()}.update_stage{new_exe.suffix}"
+    stage_path = exe_dir / stage_name
+
+    # Exclusive creation: fail if the file already exists (possible race).
+    try:
+        # Write to a temporary location first, then rename atomically.
+        tmp_stage = stage_path.with_suffix(".tmp")
+        shutil.copy2(str(new_exe), str(tmp_stage))
+        # Verify the copy by reading it back and checking the MZ header.
+        with open(tmp_stage, 'rb') as fh:
+            if fh.read(2) != b"MZ":
+                tmp_stage.unlink(missing_ok=True)
+                raise UpdateError("staged file does not appear to be a valid Windows executable")
+        # Atomic rename into the final staging location.
+        os.replace(str(tmp_stage), str(stage_path))
+    except UpdateError:
+        # Clean up any partial staging file.
+        tmp_stage.unlink(missing_ok=True)
+        stage_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        # Clean up partial artefacts.
+        tmp_stage.unlink(missing_ok=True)
+        stage_path.unlink(missing_ok=True)
+        raise UpdateError(f"failed to stage executable: {exc}") from exc
+
+    return stage_path
 
 
 def _download_checksum(url: str) -> str:
@@ -320,7 +376,7 @@ def auto_update() -> None:
         ui.print_color(f"[UPDATE] Update aborted. Download manually: {config.REPO_URL}/releases/latest", ui.Colors.GRAY)
         return
 
-    # 5. Download, verify + replace
+    # 5. Download, verify + replace (same-volume staging)
     ui.print_color(f"[UPDATE] New version available: {config.VERSION} → {tag}", ui.Colors.GREEN, bold=True)
     tmp_path: Path | None = None
     try:
@@ -333,8 +389,29 @@ def auto_update() -> None:
             checksum_asset['browser_download_url'],
             tmp_path,
         )
-        _replace_exe(tmp_path)
+        # Successfully verified - now stage in installation directory
+        # so that all os.replace() calls are same-volume.
+        exe_dir = Path(sys.executable).parent
+        staged_path = _stage_exe_in_install_dir(tmp_path, exe_dir)
+
+        try:
+            _replace_exe(staged_path)
+        except UpdateError as e:
+            # UpdateError already contains the backup path and recovery
+            # instructions; just display them.
+            ui.print_color(f"[UPDATE] Update aborted: {e}", ui.Colors.RED)
+            if e.backup_path:
+                ui.print_color(
+                    f"[UPDATE] Backup preserved at: {e.backup_path}",
+                    ui.Colors.YELLOW,
+                )
+                ui.print_color(
+                    "[UPDATE] Please manually restore the backup or reinstall.",
+                    ui.Colors.GRAY,
+                )
+            ui.print_color(f"[UPDATE] Download manually: {config.REPO_URL}/releases/latest", ui.Colors.GRAY)
     except UpdateError as e:
+        # Download or verification failed - display error but don't stage.
         ui.print_color(f"[UPDATE] Update aborted: {e}", ui.Colors.RED)
         ui.print_color(f"[UPDATE] Download manually: {config.REPO_URL}/releases/latest", ui.Colors.GRAY)
     except Exception as e:
