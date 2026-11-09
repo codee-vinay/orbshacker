@@ -4,6 +4,7 @@ import sys
 import json
 import time
 import importlib.util
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -195,6 +196,7 @@ def test_timer_self_destruction(tmp_path):
         with patch("sys.frozen", True, create=True), \
              patch("sys.executable", str(exe_path)), \
              patch("subprocess.Popen") as mock_popen, \
+             patch.object(subprocess, "CREATE_NO_WINDOW", 0, create=True), \
              patch("sys.exit") as mock_exit:
 
             app.trigger_self_destruction()
