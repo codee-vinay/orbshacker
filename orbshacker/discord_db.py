@@ -234,9 +234,11 @@ class DiscordGamesDB:
         result: list[str] = []
         seen: set[str] = set()
         for exe in game.get('executables', []):
-            if exe.get('os') != 'win32':
+            if not isinstance(exe, Mapping) or exe.get('os') != 'win32':
                 continue
-            name = exe.get('name', '')
+            name = exe.get('name')
+            if not isinstance(name, str):
+                continue
             if name.startswith('>'):
                 name = name[1:]
             name = sanitize_relative_path(name)
@@ -248,9 +250,41 @@ class DiscordGamesDB:
             result.append(name)
         return result
 
+    def _valid_win32_executables(self, game: GameRecord) -> list[tuple[str, bool]]:
+        """Return sanitised ``(name, marked)`` pairs in payload order.
+
+        Entries that are not usable Windows executables, whose name is blank
+        before sanitisation, that duplicate an earlier name, or that match a
+        skip pattern are excluded.
+        """
+        candidates: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for exe in game.get('executables', []):
+            if not isinstance(exe, Mapping) or exe.get('os') != 'win32':
+                continue
+            raw_name = exe.get('name')
+            if not isinstance(raw_name, str):
+                continue
+            marked = raw_name.startswith('>')
+            raw_name = raw_name[1:] if marked else raw_name
+            if not raw_name.strip():
+                continue
+            name = sanitize_relative_path(raw_name)
+            if not name or name in seen:
+                continue
+            if any(p in name.lower() for p in self._SKIP_EXE_PATTERNS):
+                continue
+            seen.add(name)
+            candidates.append((name, marked))
+        return candidates
+
     def get_win32_executable(self, game: GameRecord) -> str | None:
-        candidates = self._filter_win32_exes(game, skip_patterns=True)
-        return candidates[0] if candidates else None
+        """Prefer Discord's '>'-marked executable, else the first candidate."""
+        candidates = self._valid_win32_executables(game)
+        for name, marked in candidates:
+            if marked:
+                return name
+        return candidates[0][0] if candidates else None
 
     def get_all_executables(self, game: GameRecord) -> list[str]:
         return self._filter_win32_exes(game, skip_patterns=False)

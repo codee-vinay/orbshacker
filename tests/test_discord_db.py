@@ -103,3 +103,88 @@ class TestFilterWin32Exes:
         exes = db.get_all_executables(games[0])
         assert exes == ["GameSpecial/Bin/Launch.exe"]
 
+
+def _game_with_executables(*executables):
+    return {"id": "1", "name": "Test Game", "executables": list(executables)}
+
+
+class TestPreferredExecutable:
+    def test_marked_executable_preferred_over_earlier_unmarked(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": "javaw.exe"},
+            {"os": "win32", "name": ">Minecraft.Windows.exe"},
+        )
+        assert db.get_win32_executable(game) == "Minecraft.Windows.exe"
+
+    def test_marked_anti_cheat_is_skipped(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": ">Game_BE.exe"},
+            {"os": "win32", "name": "Game.exe"},
+        )
+        assert db.get_win32_executable(game) == "Game.exe"
+
+    def test_falls_back_to_first_candidate_without_marker(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": "First.exe"},
+            {"os": "win32", "name": "Second.exe"},
+        )
+        assert db.get_win32_executable(game) == "First.exe"
+
+    def test_first_marked_candidate_wins(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": ">First.exe"},
+            {"os": "win32", "name": ">Second.exe"},
+        )
+        assert db.get_win32_executable(game) == "First.exe"
+
+    def test_marked_linux_executable_ignored(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "linux", "name": ">game"},
+            {"os": "win32", "name": "Game.exe"},
+        )
+        assert db.get_win32_executable(game) == "Game.exe"
+
+    def test_marked_name_is_sanitised(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": ">Game™:Special®.exe"},
+        )
+        exe = db.get_win32_executable(game)
+        assert exe == "GameSpecial.exe"
+        assert not exe.startswith(">")
+
+    def test_marker_only_or_blank_marked_names_are_ignored(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": ">"},
+            {"os": "win32", "name": ">   "},
+            {"os": "win32", "name": "Fallback.exe"},
+        )
+        assert db.get_win32_executable(game) == "Fallback.exe"
+
+    def test_malformed_executable_entries_are_ignored(self):
+        db = _make_db_with_games([])
+        game = {
+            "id": "1",
+            "name": "Test Game",
+            "executables": ["oops", None, {"os": "win32", "name": 5}],
+        }
+        assert db.get_win32_executable(game) is None
+        assert db.get_all_executables(game) == []
+
+    def test_get_all_executables_unchanged_by_marker_preference(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": "javaw.exe"},
+            {"os": "win32", "name": ">Minecraft.Windows.exe"},
+        )
+        assert db.get_all_executables(game) == [
+            "javaw.exe",
+            "Minecraft.Windows.exe",
+        ]
+
