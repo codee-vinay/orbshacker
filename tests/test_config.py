@@ -146,7 +146,8 @@ def test_faker_custom_timer_minutes(tmp_path):
 
 def test_is_faked_game():
     # Load orbshacker entrypoint dynamically to test its functions
-    spec = importlib.util.spec_from_file_location("orbshacker_script", "orbshacker.py")
+    script_path = Path(__file__).resolve().parents[1] / "orbshacker.py"
+    spec = importlib.util.spec_from_file_location("orbshacker_script", script_path)
     orb_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(orb_module)
 
