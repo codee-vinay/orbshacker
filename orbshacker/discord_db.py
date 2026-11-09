@@ -2,6 +2,8 @@
 discord_db.py – DiscordGamesDB class and database search mode.
 """
 
+import logging
+from collections.abc import Mapping
 from typing import TypedDict
 import time
 
@@ -28,46 +30,165 @@ class GameRecord(TypedDict, total=False):
     executables: list[ExecutableEntry]
 
 
+logger = logging.getLogger(__name__)
+
+
+def _normalise_game_id(value: object) -> str | None:
+    """Return a usable id: a non-empty string, or an int converted to string.
+
+    Booleans are rejected explicitly because ``bool`` is an ``int`` subclass.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
+
+
+def _normalise_aliases(value: object) -> list[str]:
+    """Return only non-empty strings from *value*, or ``[]`` if malformed."""
+    if not isinstance(value, list):
+        return []
+    aliases: list[str] = []
+    for alias in value:
+        if isinstance(alias, str):
+            cleaned = alias.strip()
+            if cleaned:
+                aliases.append(cleaned)
+    return aliases
+
+
+def _normalise_executables(value: object) -> list[ExecutableEntry]:
+    """Return only usable executable entries, or ``[]`` if malformed."""
+    if not isinstance(value, list):
+        return []
+    executables: list[ExecutableEntry] = []
+    for entry in value:
+        if not isinstance(entry, Mapping):
+            continue
+        os_name = entry.get("os")
+        exe_name = entry.get("name")
+        if not isinstance(os_name, str) or not isinstance(exe_name, str):
+            continue
+        os_name, exe_name = os_name.strip(), exe_name.strip()
+        if os_name and exe_name:
+            executables.append({"os": os_name, "name": exe_name})
+    return executables
+
+
+def normalise_game(raw: object) -> GameRecord | None:
+    """Return a validated copy of *raw*, or ``None`` if it is unusable.
+
+    ``id`` and ``name`` are essential; aliases and executables are optional
+    and degrade to empty lists when missing or malformed. The input payload
+    is never mutated.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    game_id = _normalise_game_id(raw.get("id"))
+    raw_name = raw.get("name")
+    if game_id is None or not isinstance(raw_name, str):
+        return None
+    name = raw_name.strip()
+    if not name:
+        return None
+    return {
+        "id": game_id,
+        "name": name,
+        "aliases": _normalise_aliases(raw.get("aliases")),
+        "executables": _normalise_executables(raw.get("executables")),
+    }
+
+
+def validate_catalogue(payload: object, *, source_label: str) -> list[GameRecord]:
+    """Validate a full payload before it may replace the live catalogue.
+
+    Raises ``DatabaseLoadError`` when the payload is not a list or contains
+    no usable records, so the caller can fall back to another source.
+    """
+    if not isinstance(payload, list):
+        raise DatabaseLoadError(f"{source_label} payload is not a list of games")
+
+    games: list[GameRecord] = []
+    rejected = 0
+    for raw in payload:
+        game = normalise_game(raw)
+        if game is None:
+            rejected += 1
+            continue
+        games.append(game)
+
+    if rejected:
+        logger.debug("%s: rejected %d malformed game record(s)", source_label, rejected)
+    if not games:
+        raise DatabaseLoadError(f"{source_label} contained no usable games")
+    return games
+
+
 class DiscordGamesDB:
     """Loads and searches the Discord-detectable games database."""
 
     def __init__(self):
         self.games: list[GameRecord] = []
         self.source: str | None = None
+        self.last_error: str | None = None
         self._load()
 
-    def _load(self):
-        """Load games from Discord API or GitHub backup."""
+    def _load(self) -> None:
+        """Load games from the Discord API or the GitHub backup.
+
+        The catalogue is replaced only after a source validates completely,
+        so a failed reload keeps the last known-good games.
+        """
         print_color("\n[*] Loading games database...", Colors.YELLOW)
-        if self._load_from_discord_api():
-            return
-        print_color("[!] Discord API unavailable, using GitHub backup...", Colors.YELLOW)
-        if self._load_from_github():
-            return
-        raise DatabaseLoadError("Could not load games database from any source.")
 
-    def _load_from_discord_api(self) -> bool:
+        failures: list[str] = []
+
         try:
-            loading_animation("Connecting to Discord API", 1.0)
-            self.games = fetch_json(config.DISCORD_API_URL, headers=config.DISCORD_HEADERS)
+            games = self._load_from_discord_api()
+        except (NetworkError, DatabaseLoadError) as exc:
+            failures.append(f"Discord Official API: {exc}")
+            print_color(f"[!] Discord API error: {exc}", Colors.YELLOW)
+            print_color("[!] Discord API unavailable, using GitHub backup...", Colors.YELLOW)
+        else:
+            self.games = games
             self.source = "Discord Official API"
-            print_color(f"[OK] Loaded {len(self.games)} games from Discord API", Colors.GREEN, bold=True)
-            print_color("[*] Using LIVE database (fresh from Discord's servers)", Colors.CYAN)
-            return True
-        except NetworkError as e:
-            print_color(f"[!] Discord API error: {e}", Colors.YELLOW)
-            return False
+            return
 
-    def _load_from_github(self) -> bool:
         try:
-            loading_animation("Fetching GitHub backup", 1.0)
-            self.games = fetch_json(config.GITHUB_BACKUP_URL, timeout=config.REQUEST_TIMEOUT_LONG)
+            games = self._load_from_github()
+        except (NetworkError, DatabaseLoadError) as exc:
+            failures.append(f"GitHub Backup: {exc}")
+            print_color(f"[ERROR] GitHub backup failed: {exc}", Colors.RED)
+        else:
+            self.games = games
             self.source = "GitHub Backup"
-            print_color(f"[OK] Loaded {len(self.games)} games from GitHub", Colors.GREEN, bold=True)
-            return True
-        except NetworkError as e:
-            print_color(f"[ERROR] GitHub backup failed: {e}", Colors.RED)
-            return False
+            return
+
+        self.last_error = "; ".join(failures)
+        raise DatabaseLoadError(
+            f"Could not load games database from any source. {self.last_error}"
+        )
+
+    def _load_from_discord_api(self) -> list[GameRecord]:
+        """Fetch and validate the live catalogue from Discord."""
+        loading_animation("Connecting to Discord API", 1.0)
+        payload = fetch_json(config.DISCORD_API_URL, headers=config.DISCORD_HEADERS)
+        games = validate_catalogue(payload, source_label="Discord Official API")
+        print_color(f"[OK] Loaded {len(games)} games from Discord API", Colors.GREEN, bold=True)
+        print_color("[*] Using LIVE database (fresh from Discord's servers)", Colors.CYAN)
+        return games
+
+    def _load_from_github(self) -> list[GameRecord]:
+        """Fetch and validate the GitHub backup catalogue."""
+        loading_animation("Fetching GitHub backup", 1.0)
+        payload = fetch_json(config.GITHUB_BACKUP_URL, timeout=config.REQUEST_TIMEOUT_LONG)
+        games = validate_catalogue(payload, source_label="GitHub Backup")
+        print_color(f"[OK] Loaded {len(games)} games from GitHub", Colors.GREEN, bold=True)
+        return games
 
     def search_games(self, query: str) -> list[GameRecord]:
         """Search for games by name or alias, returning up to MAX_SEARCH_RESULTS matches."""
