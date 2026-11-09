@@ -1,4 +1,4 @@
-"""Tests for DiscordGamesDB loading – validation, fallback and atomicity."""
+"""Tests for DiscordGamesDB loading – lazy loading, validation and atomicity."""
 
 import copy
 import logging
@@ -56,49 +56,119 @@ def _use_fetcher(monkeypatch, responses):
     return fetcher
 
 
+def _load_db(monkeypatch, responses):
+    """Build a lazy DB and load it explicitly."""
+    fetcher = _use_fetcher(monkeypatch, responses)
+    db = DiscordGamesDB()
+    db.ensure_loaded()
+    return db, fetcher
+
+
 def _blank_db():
     """A DiscordGamesDB without running __init__ (which would hit the network)."""
     db = object.__new__(DiscordGamesDB)
     db.games = []
     db.source = None
     db.last_error = None
+    db._loaded = False
     return db
+
+
+class TestLazyLoading:
+    def test_constructor_makes_no_network_calls(self, monkeypatch):
+        fetcher = _use_fetcher(monkeypatch, {DISCORD_URL: VALID_GAMES})
+
+        db = DiscordGamesDB()
+
+        assert fetcher.calls == []
+        assert db.games == []
+        assert db.source is None
+        assert db.last_error is None
+        assert db._loaded is False
+
+    def test_constructor_prints_nothing(self, monkeypatch, capsys):
+        _use_fetcher(monkeypatch, {DISCORD_URL: VALID_GAMES})
+
+        DiscordGamesDB()
+
+        assert capsys.readouterr().out == ""
+
+    def test_ensure_loaded_is_idempotent(self, monkeypatch):
+        db, fetcher = _load_db(monkeypatch, {DISCORD_URL: VALID_GAMES})
+        games = db.games
+
+        db.ensure_loaded()
+
+        assert db.games is games
+        assert db.source == "Discord Official API"
+        assert fetcher.calls == [DISCORD_URL]
+
+    def test_failed_load_is_retryable(self, monkeypatch):
+        fetcher = _use_fetcher(
+            monkeypatch,
+            {
+                DISCORD_URL: NetworkError("discord down"),
+                GITHUB_URL: NetworkError("github down"),
+            },
+        )
+        db = DiscordGamesDB()
+
+        with pytest.raises(DatabaseLoadError):
+            db.ensure_loaded()
+
+        assert db._loaded is False
+        assert db.last_error is not None
+
+        fetcher.responses[GITHUB_URL] = VALID_GAMES
+        db.ensure_loaded()
+
+        assert db.source == "GitHub Backup"
+        assert len(db.games) == 2
+        assert db.last_error is None
+        assert db._loaded is True
+        assert fetcher.calls == [DISCORD_URL, GITHUB_URL, DISCORD_URL, GITHUB_URL]
+
+    def test_search_before_load_returns_empty(self, monkeypatch):
+        fetcher = _use_fetcher(monkeypatch, {DISCORD_URL: VALID_GAMES})
+        db = DiscordGamesDB()
+        game = {
+            "id": "1",
+            "name": "Unloaded",
+            "executables": [{"os": "win32", "name": "game.exe"}],
+        }
+
+        assert db.search_games("mine") == []
+        # Executable lookup is a pure helper over the given record: no I/O.
+        assert db.get_win32_executable(game) == "game.exe"
+        assert fetcher.calls == []
 
 
 class TestLoading:
     def test_loads_valid_catalogue(self, monkeypatch):
-        fetcher = _use_fetcher(monkeypatch, {DISCORD_URL: VALID_GAMES})
-
-        db = DiscordGamesDB()
+        db, fetcher = _load_db(monkeypatch, {DISCORD_URL: VALID_GAMES})
 
         assert [g["id"] for g in db.games] == ["1", "2"]
         assert db.source == "Discord Official API"
         assert fetcher.calls == [DISCORD_URL]
 
     def test_falls_back_when_discord_fails(self, monkeypatch):
-        fetcher = _use_fetcher(
+        db, fetcher = _load_db(
             monkeypatch,
             {DISCORD_URL: NetworkError("boom"), GITHUB_URL: VALID_GAMES},
         )
-
-        db = DiscordGamesDB()
 
         assert db.source == "GitHub Backup"
         assert fetcher.calls == [DISCORD_URL, GITHUB_URL]
 
     @pytest.mark.parametrize("payload", [{}, None, "games", 123])
     def test_non_list_payload_falls_back(self, monkeypatch, payload):
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload, GITHUB_URL: VALID_GAMES})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: payload, GITHUB_URL: VALID_GAMES})
 
         assert db.source == "GitHub Backup"
         assert len(db.games) == 2
 
     def test_empty_catalogue_tries_backup(self, monkeypatch):
-        fetcher = _use_fetcher(monkeypatch, {DISCORD_URL: [], GITHUB_URL: VALID_GAMES})
-
-        db = DiscordGamesDB()
+        db, fetcher = _load_db(monkeypatch, {DISCORD_URL: [], GITHUB_URL: VALID_GAMES})
 
         assert db.source == "GitHub Backup"
         assert fetcher.calls == [DISCORD_URL, GITHUB_URL]
@@ -114,7 +184,7 @@ class TestLoading:
         db = _blank_db()
 
         with pytest.raises(DatabaseLoadError) as excinfo:
-            db._load()
+            db.ensure_loaded()
 
         message = str(excinfo.value)
         assert "Discord Official API" in message and "discord down" in message
@@ -127,7 +197,7 @@ class TestLoading:
         db = _blank_db()
 
         with pytest.raises(DatabaseLoadError) as excinfo:
-            db._load()
+            db.ensure_loaded()
 
         assert "GitHub Backup payload is not a list" in str(excinfo.value)
 
@@ -142,9 +212,7 @@ class TestValidation:
             {"name": "No Id"},
             {"id": "y", "name": "   "},
         ]
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: payload})
 
         assert len(db.games) == 1
         assert db.games[0]["id"] == "1"
@@ -156,9 +224,7 @@ class TestValidation:
             {"id": "  ", "name": "Blank"},
             {"id": "7", "name": "  Spaced Name  "},
         ]
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: payload})
 
         assert [g["id"] for g in db.games] == ["42", "7"]
         assert db.games[0]["name"] == "Integer"
@@ -171,9 +237,7 @@ class TestValidation:
             "aliases": "MC",
             "executables": [{"os": "win32"}, "not-a-dict", {"name": "Game.exe"}],
         }]
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: payload})
 
         game = db.games[0]
         assert game["aliases"] == []
@@ -186,9 +250,7 @@ class TestValidation:
             {"id": "1", "name": "First"},
             {"id": "1", "name": "Second"},
         ]
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: payload})
 
         assert len(db.games) == 2
         assert [g["name"] for g in db.games] == ["First", "Second"]
@@ -196,24 +258,21 @@ class TestValidation:
     def test_payload_is_not_mutated(self, monkeypatch):
         payload = copy.deepcopy(VALID_GAMES)
         snapshot = copy.deepcopy(payload)
-        _use_fetcher(monkeypatch, {DISCORD_URL: payload})
-
-        DiscordGamesDB()
+        _load_db(monkeypatch, {DISCORD_URL: payload})
 
         assert payload == snapshot
 
     def test_rejected_records_logged_at_debug(self, monkeypatch, caplog):
         _use_fetcher(monkeypatch, {DISCORD_URL: [VALID_GAMES[0], {}]})
+        db = DiscordGamesDB()
 
         with caplog.at_level(logging.DEBUG, logger="orbshacker.discord_db"):
-            DiscordGamesDB()
+            db.ensure_loaded()
 
         assert "rejected 1" in caplog.text
 
     def test_search_behaviour_unchanged(self, monkeypatch):
-        _use_fetcher(monkeypatch, {DISCORD_URL: VALID_GAMES})
-
-        db = DiscordGamesDB()
+        db, _ = _load_db(monkeypatch, {DISCORD_URL: VALID_GAMES})
 
         assert [g["id"] for g in db.search_games("mine")] == ["1", "2"]
         assert db.search_games("MC")[0]["id"] == "1"
@@ -248,7 +307,8 @@ class TestAtomicity:
         )
 
         with pytest.raises(DatabaseLoadError):
-            db._load()
+            db.ensure_loaded()
 
         assert len(db.games) == 2
         assert db.source == "Discord Official API"
+        assert db._loaded is False

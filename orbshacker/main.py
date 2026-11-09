@@ -29,6 +29,7 @@ def main() -> None:
 
     try:
         db = DiscordGamesDB()
+        db.ensure_loaded()
     except DatabaseLoadError as e:
         print_color(f"[ERROR] {e}", Colors.RED, bold=True)
         sys.exit(1)

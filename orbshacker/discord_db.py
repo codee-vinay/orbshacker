@@ -135,7 +135,20 @@ class DiscordGamesDB:
         self.games: list[GameRecord] = []
         self.source: str | None = None
         self.last_error: str | None = None
+        self._loaded = False
+
+    def ensure_loaded(self) -> None:
+        """Load the catalogue on first use.
+
+        A successful load is idempotent; a failed load raises
+        ``DatabaseLoadError`` and leaves the instance retryable, with any
+        previously loaded catalogue untouched.
+        """
+        if self._loaded:
+            return
         self._load()
+        self.last_error = None
+        self._loaded = True
 
     def _load(self) -> None:
         """Load games from the Discord API or the GitHub backup.
@@ -191,7 +204,10 @@ class DiscordGamesDB:
         return games
 
     def search_games(self, query: str) -> list[GameRecord]:
-        """Search for games by name or alias, returning up to MAX_SEARCH_RESULTS matches."""
+        """Search for games by name or alias, returning up to MAX_SEARCH_RESULTS matches.
+
+        Reads the loaded catalogue only; call ensure_loaded() first.
+        """
         query_lower = query.lower()
         exact: dict[str, GameRecord] = {}
         partial: dict[str, GameRecord] = {}
