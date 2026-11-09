@@ -170,9 +170,30 @@ VERSION   = _resolve_version()
 DEVELOPER = "Strykey / Daniel Pires / Pannenkoekisus"
 
 # ── GitHub repo ───────────────────────────────────────────────────────────────
-GITHUB_REPO_OWNER = "DanielPires2000"
-GITHUB_REPO_NAME  = "orbshacker"
-REPO_URL          = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
+# Release builds write ``_version.GITHUB_REPOSITORY`` with the repository that
+# published the executable; source checkouts fall back to this fork.
+_DEFAULT_REPO_OWNER = "codee-vinay"
+_DEFAULT_REPO_NAME  = "orbshacker"
+
+
+def _resolve_repository() -> tuple[str, str]:
+    """Return the repository the updater should query.
+
+    ``_version.GITHUB_REPOSITORY`` is written by the release workflow as
+    ``owner/name``. Missing or malformed values keep the development default.
+    """
+    injected = getattr(_build_version, "GITHUB_REPOSITORY", None)
+    if isinstance(injected, str):
+        owner, separator, name = injected.strip().partition("/")
+        owner = owner.strip()
+        name = name.strip()
+        if separator and owner and name and "/" not in name:
+            return owner, name
+    return _DEFAULT_REPO_OWNER, _DEFAULT_REPO_NAME
+
+
+GITHUB_REPO_OWNER, GITHUB_REPO_NAME = _resolve_repository()
+REPO_URL = f"https://github.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
 
 # ── Network endpoints (internal – not in settings.py) ─────────────────────────
 DISCORD_API_URL        = "https://discord.com/api/v9/applications/detectable"

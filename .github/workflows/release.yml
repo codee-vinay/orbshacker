@@ -39,15 +39,30 @@ jobs:
 
           echo "TAG_NAME=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
 
+      - name: Run tests
+        run: python -m pytest -q
+
       - name: Write version metadata
         shell: bash
         run: |
           VERSION="${{ steps.tag.outputs.TAG_NAME }}"
-          printf 'VERSION = "%s"\n' "${VERSION#v}" > orbshacker/_version.py
+          printf 'VERSION = "%s"\nGITHUB_REPOSITORY = "%s"\n' "${VERSION#v}" "${GITHUB_REPOSITORY}" > orbshacker/_version.py
 
       - name: Build executable
         run: |
           pyinstaller --onefile --name orbshacker --noconsole --add-data "settings.py;." --collect-all orbshacker orbshacker.py
+
+      - name: Generate SHA-256 checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          exe = Path("dist/orbshacker.exe")
+          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+          Path(f"{exe}.sha256").write_text(f"{digest}  {exe.name}\n", encoding="utf-8")
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.6.1
@@ -56,12 +71,17 @@ jobs:
           name: Orbshacker ${{ steps.tag.outputs.TAG_NAME }}
           body: |
             ## Orbshacker ${{ steps.tag.outputs.TAG_NAME }}
-            
+
             ### Download
             Download `orbshacker.exe` below and run it. No Python required!
-            
+
+            Verify the download against `orbshacker.exe.sha256` if you want to
+            check that it was transferred intact.
+
             ### What's new
             See the [commit log](https://github.com/${{ github.repository }}/commits/${{ steps.tag.outputs.TAG_NAME }}) for details.
-          files: dist/orbshacker.exe
+          files: |
+            dist/orbshacker.exe
+            dist/orbshacker.exe.sha256
           draft: false
           prerelease: false

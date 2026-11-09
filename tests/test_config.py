@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from orbshacker import config as config_module
 from orbshacker.config import _load_settings
 from orbshacker.faker import GameFaker
 
@@ -238,3 +239,47 @@ def test_load_settings_baked_frozen(tmp_path):
         assert settings.get("CHOSEN_FOLDER") == "BakedDir"
         assert settings.get("AUTO_DELETE") is True
         assert settings.get("TIMER_MINUTES") == 45
+
+
+class TestResolveRepository:
+    default = ("codee-vinay", "orbshacker")
+
+    def test_defaults_to_fork(self, monkeypatch):
+        monkeypatch.delattr(
+            config_module._build_version, "GITHUB_REPOSITORY", raising=False
+        )
+        assert config_module._resolve_repository() == self.default
+
+    def test_uses_repository_injected_at_build_time(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module._build_version,
+            "GITHUB_REPOSITORY",
+            "codee-vinay/orbshacker",
+            raising=False,
+        )
+        assert config_module._resolve_repository() == self.default
+
+    def test_uses_a_different_injected_repository(self, monkeypatch):
+        monkeypatch.setattr(
+            config_module._build_version,
+            "GITHUB_REPOSITORY",
+            "someone-else/orbshacker-fork",
+            raising=False,
+        )
+        assert config_module._resolve_repository() == (
+            "someone-else",
+            "orbshacker-fork",
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "owner", "/name", "owner/", "owner/name/extra", None, 123],
+    )
+    def test_malformed_values_fall_back_to_default(self, monkeypatch, value):
+        monkeypatch.setattr(
+            config_module._build_version,
+            "GITHUB_REPOSITORY",
+            value,
+            raising=False,
+        )
+        assert config_module._resolve_repository() == self.default
