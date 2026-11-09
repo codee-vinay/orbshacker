@@ -162,15 +162,16 @@ def test_is_faked_game():
 
     # 2. Frozen mode cases
     with patch("sys.frozen", True, create=True), \
-         patch("sys.executable", "C:\\Users\\jjjda\\Desktop\\orbshacker.exe"):
+         patch("sys.executable", "C:/Users/jjjda/Desktop/orbshacker.exe"):
         assert not orb_module.is_faked_game()
 
     with patch("sys.frozen", True, create=True), \
-         patch("sys.executable", "C:\\Users\\jjjda\\Desktop\\Win64\\TslGame.exe"):
+         patch("sys.executable", "C:/Users/jjjda/Desktop/Win64/TslGame.exe"):
         assert orb_module.is_faked_game()
 
 
 def test_timer_self_destruction(tmp_path):
+    pytest.importorskip("tkinter", reason="Tkinter is unavailable in this Python environment.")
     from orbshacker.timer import TimerApp
     import orbshacker.config as config
 
