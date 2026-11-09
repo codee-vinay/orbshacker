@@ -1,6 +1,7 @@
 """Tests for discord_db.py – pure functions only (no network calls)."""
 
 from orbshacker.discord_db import DiscordGamesDB
+from orbshacker import config
 
 
 def _make_db_with_games(games: list) -> DiscordGamesDB:
@@ -187,4 +188,48 @@ class TestPreferredExecutable:
             "javaw.exe",
             "Minecraft.Windows.exe",
         ]
+
+
+class TestSearchDeduplication:
+    def test_duplicate_ids_collapse_and_exact_match_wins(self):
+        games = [
+            {"id": "1", "name": "Alpha", "aliases": [], "executables": []},
+            {"id": "1", "name": "Alpha Duplicate", "aliases": [], "executables": []},
+            {"id": "2", "name": "Alphabet", "aliases": [], "executables": []},
+        ]
+        db = _make_db_with_games(games)
+
+        results = db.search_games("alpha")
+
+        assert [g["id"] for g in results] == ["1", "2"]
+        assert results[0]["name"] == "Alpha"
+
+    def test_results_are_truncated_to_max_search_results(self):
+        games = [
+            {"id": str(i), "name": f"Game {i:02d}", "aliases": [], "executables": []}
+            for i in range(config.MAX_SEARCH_RESULTS + 5)
+        ]
+        db = _make_db_with_games(games)
+
+        results = db.search_games("Game")
+
+        assert len(results) == config.MAX_SEARCH_RESULTS
+        assert [g["id"] for g in results] == [str(i) for i in range(config.MAX_SEARCH_RESULTS)]
+
+
+class TestSkipPatterns:
+    def test_anti_cheat_launcher_and_updater_candidates_are_rejected(self):
+        db = _make_db_with_games([])
+        game = _game_with_executables(
+            {"os": "win32", "name": "Game_BE.exe"},
+            {"os": "win32", "name": "GameLauncher.exe"},
+            {"os": "win32", "name": "GameUpdater.exe"},
+            {"os": "win32", "name": "Game.exe"},
+        )
+
+        assert db.get_win32_executable(game) == "Game.exe"
+        all_exes = db.get_all_executables(game)
+        assert "Game_BE.exe" in all_exes
+        assert "GameLauncher.exe" in all_exes
+        assert "GameUpdater.exe" in all_exes
 
