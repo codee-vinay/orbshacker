@@ -36,43 +36,44 @@ def test_load_settings_json_in_dev(tmp_path):
         assert settings.get("CHOSEN_FOLDER") == "CustomDir"
 
 
-def test_load_settings_frozen_creates_json_and_loads(tmp_path):
-    # Simulate frozen mode where settings.json is missing next to the exe
+def test_load_settings_frozen_creates_json_and_loads(tmp_path):# Simulate frozen mode where no AppData is available and no settings exist
     exe_path = tmp_path / "orbshacker.exe"
     exe_path.touch()
 
-    json_file = tmp_path / "settings.json"
-
     with patch("sys.frozen", True, create=True), \
-         patch("sys.executable", str(exe_path)):
+         patch("sys.executable", str(exe_path)), \
+         patch.dict("os.environ", {}, clear=True):  # Ensure LOCALAPPDATA is absent
 
         settings = _load_settings()
-
-        # Verify it created a default settings.json next to the executable
-        assert json_file.exists()
-        expected_desktop = str(Path.home() / "Desktop").replace("\\", "/")
-        assert expected_desktop in json_file.read_text(encoding="utf-8")
-
-        # Verify it loaded the dictionary correctly
-        assert isinstance(settings, dict)
-        assert settings.get("CHOSEN_FOLDER") == expected_desktop
+        # In frozen mode without AppData, return in-memory defaults        assert isinstance(settings, dict)
+        assert settings.get("CHOSEN_FOLDER") == "Desktop"
         assert settings.get("TIMER_MINUTES") == 15
+
+        # No settings.json should be created beside the executable        exe_dir = Path(sys.executable).parent        assert not (exe_dir / "settings.json").exists(), \
+            "Settings should not be written beside the executable in frozen mode without AppData"
 
 
 def test_load_settings_frozen_existing_json(tmp_path):
-    # Simulate frozen mode where settings.json already exists next to the exe
-    exe_path = tmp_path / "orbshacker.exe"
+    # Simulate frozen mode with existing legacy settings.json beside exe,
+    # and NO AppData available (LOCALAPPDATA not set).    # The code returns in-memory defaults and preserves the legacy file.    exe_path = tmp_path / "orbshacker.exe"
     exe_path.touch()
 
     json_file = tmp_path / "settings.json"
     json_file.write_text('{"CHOSEN_FOLDER": "FrozenDir"}', encoding="utf-8")
 
     with patch("sys.frozen", True, create=True), \
-         patch("sys.executable", str(exe_path)):
+         patch("sys.executable", str(exe_path)), \
+         patch.dict("os.environ", {}, clear=True):  # No LOCALAPPDATA
 
         settings = _load_settings()
-        assert isinstance(settings, dict)
-        assert settings.get("CHOSEN_FOLDER") == "FrozenDir"
+        # In frozen mode without AppData, return in-memory defaults        assert isinstance(settings, dict)
+        assert settings.get("CHOSEN_FOLDER") == "Desktop"
+        assert settings.get("TIMER_MINUTES") == 15
+
+        # Legacy file should be preserved since AppData is unavailable for migration
+        legacy = Path(sys.executable).parent / "settings.json"
+        assert legacy.exists(), "Legacy settings.json should be preserved when AppData is unavailable"
+        assert legacy.read_text(encoding="utf-8") == '{"CHOSEN_FOLDER": "FrozenDir"}'
 
 
 def test_faker_cleanup_deletes_files_and_processes(tmp_path):
