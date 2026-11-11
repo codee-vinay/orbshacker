@@ -82,6 +82,21 @@ def _get_appdata_settings_path() -> Path | None:
         return None
     return Path(local_appdata) / "Orbshacker" / "settings.json"
 
+def _is_valid_json_file(path: Path) -> bool:
+    """Check if *path* exists and contains valid JSON.
+
+    Never modifies or side-effects the file.
+    Returns ``True`` only when the file can be parsed as JSON.
+    """
+    if not path.exists():
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            json.load(f)
+        return True
+    except Exception:
+        return False
+
 def _load_settings():
     # 1. Try loading embedded settings from the executable
     embedded = _load_embedded_settings()
@@ -221,25 +236,6 @@ def _load_settings():
     except ImportError:
         return None  # no user settings file -- use all defaults
 
-_user = _load_settings()
-
-
-
-def _is_valid_json_file(path: Path) -> bool:
-    """Check if *path* exists and contains valid JSON.
-
-    Never modifies or side-effects the file.
-    Returns ``True`` only when the file can be parsed as JSON.
-    """
-    if not path.exists():
-        return False
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            json.load(f)
-        return True
-    except Exception:
-        return False
-
 
 def _read_json_safely(path: Path) -> dict | None:
     """Read and parse JSON from *path*.
@@ -258,6 +254,10 @@ def _read_json_safely(path: Path) -> dict | None:
         return None
     except Exception:
         return None
+
+
+
+_user = _load_settings()
 
 
 

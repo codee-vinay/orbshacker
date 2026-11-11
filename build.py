@@ -57,7 +57,7 @@ def main():
         "--onefile",
         "--name",
         "orbshacker",
-        "--noconsole",
+        "--console",
         "--add-data",
         "settings.py;.",
         "--collect-all",

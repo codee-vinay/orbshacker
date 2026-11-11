@@ -45,17 +45,22 @@ def test_load_settings_frozen_creates_json_and_loads(tmp_path):# Simulate frozen
          patch.dict("os.environ", {}, clear=True):  # Ensure LOCALAPPDATA is absent
 
         settings = _load_settings()
-        # In frozen mode without AppData, return in-memory defaults        assert isinstance(settings, dict)
+        # In frozen mode without AppData, return in-memory defaults
+        assert isinstance(settings, dict)
         assert settings.get("CHOSEN_FOLDER") == "Desktop"
         assert settings.get("TIMER_MINUTES") == 15
 
-        # No settings.json should be created beside the executable        exe_dir = Path(sys.executable).parent        assert not (exe_dir / "settings.json").exists(), \
+        # No settings.json should be created beside the executable
+        exe_dir = Path(sys.executable).parent
+        assert not (exe_dir / "settings.json").exists(), \
             "Settings should not be written beside the executable in frozen mode without AppData"
 
 
 def test_load_settings_frozen_existing_json(tmp_path):
     # Simulate frozen mode with existing legacy settings.json beside exe,
-    # and NO AppData available (LOCALAPPDATA not set).    # The code returns in-memory defaults and preserves the legacy file.    exe_path = tmp_path / "orbshacker.exe"
+    # and NO AppData available (LOCALAPPDATA not set).
+    # The code returns in-memory defaults and preserves the legacy file.
+    exe_path = tmp_path / "orbshacker.exe"
     exe_path.touch()
 
     json_file = tmp_path / "settings.json"
@@ -66,7 +71,8 @@ def test_load_settings_frozen_existing_json(tmp_path):
          patch.dict("os.environ", {}, clear=True):  # No LOCALAPPDATA
 
         settings = _load_settings()
-        # In frozen mode without AppData, return in-memory defaults        assert isinstance(settings, dict)
+        # In frozen mode without AppData, return in-memory defaults
+        assert isinstance(settings, dict)
         assert settings.get("CHOSEN_FOLDER") == "Desktop"
         assert settings.get("TIMER_MINUTES") == 15
 
@@ -284,3 +290,46 @@ class TestResolveRepository:
             raising=False,
         )
         assert config_module._resolve_repository() == self.default
+
+def test_fresh_process_no_name_error_on_frozen_import():
+    """
+    Regression test: verify that importing orbshacker.config in a fresh
+    Python process with sys.frozen = True set BEFORE import does NOT raise
+    NameError for _is_valid_json_file or _read_json_safely.
+
+    This catches the exact bug where _load_settings() calls _is_valid_json_file()
+    at module initialization before the function was defined.
+    """
+    import subprocess, sys, os, tempfile
+
+    with tempfile.TemporaryDirectory() as tmp_loc:
+        # Build child process code using string concatenation + chr(10)
+        code = "import sys" + chr(10)
+        code += "sys.frozen = True" + chr(10)
+        code += "# Use isolated LOCALAPPDATA so we do not read/write real user config" + chr(10)
+        code += "import os" + chr(10)
+        # Build the code string for LOCALAPPDATA assignment
+        # Build the code string for LOCALAPPDATA assignment
+        code += 'import os' + chr(10)
+        code += 'os.environ["LOCALAPPDATA"] = "' + tmp_loc.replace(chr(92), '/') + '"' + chr(10)
+        code += "# Now import - this should complete without NameError" + chr(10)
+        code += "from orbshacker import config as config_module" + chr(10)
+        code += "# Verify import-time initialization succeeded" + chr(10)
+        code += "print(" + chr(34) + "FROZEN_IMPORT_OK" + chr(34) + ")" + chr(10)
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": ""},
+        )
+
+        assert result.returncode == 0, (
+            f"FAIL: Subprocess exited with code {result.returncode}",
+            f"stdout: {result.stdout}",
+            f"stderr: {result.stderr}",
+        )
+
+        assert "FROZEN_IMPORT_OK" in result.stdout, (
+            f"FAIL: Expected FROZEN_IMPORT_OK in stdout, got: {result.stdout}",
+        )
