@@ -14,8 +14,15 @@ from . import config
 
 
 class Colors:
+    """ANSI palette approximating Catppuccin Mocha with the basic 16 colours.
+
+    The original names stay for existing call sites; the semantic aliases below
+    describe the roles the premium theme assigns to them.
+    """
+
     RESET   = '\033[0m'
     BOLD    = '\033[1m'
+    DIM     = '\033[2m'
     RED     = '\033[91m'
     GREEN   = '\033[92m'
     YELLOW  = '\033[93m'
@@ -25,19 +32,25 @@ class Colors:
     WHITE   = '\033[97m'
     GRAY    = '\033[90m'
 
+    # Semantic roles (teal/sky accent, lavender secondary).
+    ACCENT    = CYAN
+    SECONDARY = MAGENTA
+    SUCCESS   = GREEN
+    WARNING   = YELLOW
+    ERROR     = RED
+    INFO      = CYAN
+    MUTED     = GRAY
+    TEXT      = WHITE
+    BORDER    = GRAY
+
 
 class _NoColors:
     """Empty stand-ins used when the terminal cannot render ANSI sequences."""
 
-    RESET = BOLD = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = GRAY = ""
-
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _visible_len(text: str) -> int:
-    """Length of *text* as seen on screen (ANSI escape sequences excluded)."""
-    return len(_ANSI_RE.sub("", text))
+    RESET = BOLD = DIM = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = ""
+    WHITE = GRAY = ""
+    ACCENT = SECONDARY = SUCCESS = WARNING = ERROR = ""
+    INFO = MUTED = TEXT = BORDER = ""
 
 
 def _colors():
@@ -138,12 +151,52 @@ def _get_vt_cached() -> bool:
 
 # ── Output helpers ───────────────────────────────────────────────────────────
 
+# Status prefixes used across the application, mapped to semantic badges.
+_BADGE_RE = re.compile(r"^\[(OK|ERROR|!|\*|UPDATE)\]\s?")
+_BADGE_LABELS = {
+    "OK": "OK",
+    "ERROR": "ERR",
+    "!": "WARN",
+    "*": "INFO",
+    "UPDATE": "UPDATE",
+}
+_BADGE_COLORS = {
+    "OK": Colors.GREEN,
+    "ERROR": Colors.RED,
+    "!": Colors.YELLOW,
+    "*": Colors.CYAN,
+    "UPDATE": Colors.MAGENTA,
+}
+
+
 def print_color(text: str, color: str = Colors.WHITE, bold: bool = False) -> None:
-    """Print colored text."""
+    """Print colored text, turning a known ``[TAG]`` prefix into a status badge.
+
+    Plain-text mode prints *text* verbatim so legacy terminals keep the original
+    bracketed prefixes.
+    """
     if not _get_vt_cached():
         print(text)
         return
+
+    # Leading newlines are layout, not message content: keep them exactly and
+    # still recognise a status prefix that follows them.
+    lead = text[: len(text) - len(text.lstrip("\n"))]
+    core = text[len(lead):]
     style = Colors.BOLD if bold else ''
+
+    match = _BADGE_RE.match(core)
+    if match:
+        token = match.group(1)
+        label = _BADGE_LABELS[token]
+        badge_color = _BADGE_COLORS[token]
+        rest = core[match.end():]
+        print(
+            f"{lead}{Colors.BOLD}{badge_color}{label}{Colors.RESET} "
+            f"{style}{color}{rest}{Colors.RESET}"
+        )
+        return
+
     print(f"{style}{color}{text}{Colors.RESET}")
 
 
@@ -194,8 +247,9 @@ def print_boxed_title(title: str, width: int | None = 50, color: str = Colors.CY
     bold = Colors.BOLD if _get_vt_cached() else ""
     reset = Colors.RESET if _get_vt_cached() else ""
     col = color if _get_vt_cached() else ""
+    frame = Colors.GRAY if _get_vt_cached() else ""
 
-    border = f"{bold}{col}+{'-' * (effective - 2)}+{reset}"
+    border = f"{frame}+{'-' * (effective - 2)}+{reset}"
 
     if len(title) <= text_width:
         chunks = [title]
@@ -209,9 +263,9 @@ def print_boxed_title(title: str, width: int | None = 50, color: str = Colors.CY
         left = padding // 2
         right = padding - left
         lines.append(
-            f"{bold}{col}|{reset}"
-            f"{' ' * left}{bold}{chunk}{reset}{' ' * right}"
-            f"{bold}{col}|{reset}"
+            f"{frame}|{reset}"
+            f"{' ' * left}{bold}{col}{chunk}{reset}{' ' * right}"
+            f"{frame}|{reset}"
         )
 
     print(f"\n{border}")
@@ -222,19 +276,57 @@ def print_boxed_title(title: str, width: int | None = 50, color: str = Colors.CY
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 
-_BANNER_ART = [
-    "_____ _____ _____ _____    _____ _____ _____ _____ _____ ",
-    "|     | __  | __  |   __|  |  |  |  _  |     |  |  |   __| __  |",
-    "|  |  |    -| __ -|__   |  |     |     |   --|    -|   __|    -|",
-    "|_____|__|__|_____|_____|  |__|__|__|__|_____|__|__|_____|__|__",
-]
+# Width at which the full premium header replaces the compact one.
+_BANNER_ADVANCED_WIDTH = 64
+_BANNER_TAGLINE = "DESKTOP EXPERIENCE"
+_BANNER_STATUS = "o READY"
 
 _DATABASE_SOURCE = "Discord Official API + GitHub Archive"
 
 
-def _banner_fits_width(banner_lines: list, width: int) -> bool:
-    """True when every visible line fits inside *width* columns."""
-    return all(_visible_len(line) <= width for line in banner_lines)
+def _banner_header(width: int, vt: bool) -> list[str]:
+    """Premium header: spaced wordmark, tagline, version and a ready chip.
+
+    Geometry is computed from plain text first, so colour escapes never change
+    the visible width of a row.
+    """
+    box_width = min(width, _BANNER_ADVANCED_WIDTH)
+    if box_width < 4:
+        return []
+    inner = box_width - 2
+    border = "+" + "-" * inner + "+"
+
+    brand = "O R B S H A C K E R"
+    status = _BANNER_STATUS
+    prefix = " " + brand
+    pad = inner - len(prefix) - len(status) - 1
+
+    if pad >= 1:
+        if vt:
+            row_one = (
+                f"{Colors.GRAY}|{Colors.RESET}"
+                f" {Colors.BOLD}{Colors.CYAN}{brand}{Colors.RESET}"
+                f"{' ' * pad}"
+                f"{Colors.BOLD}{Colors.GREEN}{status}{Colors.RESET} "
+                f"{Colors.GRAY}|{Colors.RESET}"
+            )
+        else:
+            row_one = "|" + prefix + " " * pad + status + " |"
+    else:
+        clipped = ("|" + prefix)[: box_width - 1].ljust(box_width - 1) + "|"
+        row_one = f"{Colors.GRAY}{clipped}{Colors.RESET}" if vt else clipped
+
+    meta_text = f" {_BANNER_TAGLINE}  .  v{config.VERSION}"[:inner].ljust(inner)
+    row_two = (
+        f"{Colors.GRAY}|{Colors.RESET}"
+        f"{Colors.GRAY}{meta_text}{Colors.RESET}"
+        f"{Colors.GRAY}|{Colors.RESET}"
+        if vt
+        else "|" + meta_text + "|"
+    )
+
+    border_line = f"{Colors.GRAY}{border}{Colors.RESET}" if vt else border
+    return [border_line, row_one, row_two, border_line]
 
 
 def _compact_banner(width: int) -> list:
@@ -258,34 +350,46 @@ def _compact_banner(width: int) -> list:
 def _banner_info_lines(width: int, vt: bool) -> list:
     """Developer / version / database lines, wrapped instead of dropped."""
     fields = [
-        ("Developer", config.DEVELOPER, Colors.CYAN),
-        ("Version", config.VERSION, Colors.WHITE),
-        ("Database", _DATABASE_SOURCE, Colors.GREEN),
+        ("Developer:", config.DEVELOPER, Colors.CYAN),
+        ("Version:", config.VERSION, Colors.WHITE),
+        ("Database:", _DATABASE_SOURCE, Colors.GREEN),
     ]
 
+    key_width = max(len(label) for label, _, _ in fields) + 2
     lines = []
     # Below twelve columns a label such as "Developer:" would be chopped mid
     # word, so readability wins over exact fitting at those pathological sizes.
     wrap_width = max(width, _BANNER_MIN_INFO_WIDTH)
     for label, value, value_color in fields:
-        plain = f"  {label}: {value}"
+        plain = f"  {label:<{key_width}}{value}"
         if len(plain) <= wrap_width:
             if vt:
                 lines.append(
-                    f"  {Colors.GRAY}{label}: {Colors.RESET}"
+                    f"  {Colors.GRAY}{label:<{key_width}}{Colors.RESET}"
                     f"{value_color}{value}{Colors.RESET}"
                 )
             else:
                 lines.append(plain)
             continue
 
-        for chunk in textwrap.wrap(plain, width=wrap_width) or [plain[:wrap_width]]:
+        # Keep wrapped values aligned under the value column when there is room;
+        # on pathological widths readability of the label wins.
+        if wrap_width > key_width + 10:
+            chunks = textwrap.wrap(
+                plain,
+                width=wrap_width,
+                subsequent_indent=" " * (2 + key_width),
+            )
+        else:
+            chunks = textwrap.wrap(plain, width=wrap_width)
+
+        for chunk in chunks or [plain[:wrap_width]]:
             lines.append(f"{Colors.GRAY}{chunk}{Colors.RESET}" if vt else chunk)
     return lines
 
 
 def print_banner() -> None:
-    """Display the ASCII banner plus developer, version and database details."""
+    """Display the Orbshacker header plus developer, version and database details."""
     width = get_console_width()
     if width <= 0:
         # A terminal that reports no usable width must not silence the banner.
@@ -293,14 +397,14 @@ def print_banner() -> None:
 
     vt = _get_vt_cached()
 
-    if _banner_fits_width(_BANNER_ART, width):
-        art = list(_BANNER_ART)
+    if width >= _BANNER_ADVANCED_WIDTH:
+        header = _banner_header(width, vt)
     elif width >= 4:
-        art = _compact_banner(width)
+        header = _compact_banner(width)
     else:
-        art = []
+        header = []
 
-    for line in art + _banner_info_lines(width, vt):
+    for line in header + _banner_info_lines(width, vt):
         print(line)
 
 
@@ -349,19 +453,91 @@ def ask_confirm(prompt: str = "Create and launch?") -> bool:
     if not _get_vt_cached():
         answer = input("\n" + prompt + " [Y/n]: ").strip().lower()
         return answer in ('', 'y', 'yes')
-    answer = input(f"\n{Colors.BOLD}{prompt}{Colors.RESET} [Y/n]: ").strip().lower()
+    answer = input(
+        f"\n{Colors.BOLD}{Colors.ACCENT}{prompt}{Colors.RESET}"
+        f" {Colors.MUTED}[Y/n]{Colors.RESET}: "
+    ).strip().lower()
     return answer in ('', 'y', 'yes')
 
 
-def print_menu() -> None:
-    """Display main menu."""
-    print_boxed_title("MAIN MENU", width=50, color=Colors.CYAN)
+MENU_ITEMS = (
+    ("1", "Search Discord database", "Official API catalogue"),
+    ("2", "Manual mode", "Custom executable"),
+    ("3", "Steam Quest Mode", "AppID manifests"),
+    ("4", "Credits & Info", "About this build"),
+    ("5", "Exit", "Close Orbshacker"),
+)
+
+# Two-column menu rows only appear when there is room for the descriptions.
+_MENU_DESCRIPTION_WIDTH = 56
+
+
+def _fit_label(text: str, room: int) -> str:
+    """Trim a menu label to *room* columns, preferring a word boundary."""
+    if room <= 0:
+        return ""
+    if len(text) <= room:
+        return text
+    clipped = text[:room]
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    return clipped
+
+
+def _section_heading(title: str, width: int) -> None:
+    """Print a section label followed by a muted rule."""
     C = _colors()
-    print(f"  {C.BOLD}{C.GREEN}1.{C.RESET} Search Discord database (Official API)")
-    print(f"  {C.BOLD}{C.GREEN}2.{C.RESET} Manual mode (custom executable)")
-    print(f"  {C.BOLD}{C.YELLOW}3.{C.RESET} Steam Quest Mode  {C.YELLOW}[NEW - for Marathon, Toxic Commando…]{C.RESET}")
-    print(f"  {C.BOLD}{C.GREEN}4.{C.RESET} Credits & Info")
-    print(f"  {C.BOLD}{C.RED}5.{C.RESET} Exit\n")
+    rule = "-" * max(min(width - 4, 56), 0)
+    print(f"\n  {C.BOLD}{C.ACCENT}{title}{C.RESET}")
+    print(f"  {C.BORDER}{rule}{C.RESET}")
+
+
+def print_menu(selected: int | None = None) -> None:
+    """Display the main menu, highlighting *selected* when supplied."""
+    C = _colors()
+    width = get_console_width()
+    show_descriptions = width >= _MENU_DESCRIPTION_WIDTH
+    label_width = max(len(label) for _, label, _ in MENU_ITEMS) + 2
+    rule = "-" * max(min(width - 4, 56), 0)
+
+    _section_heading("MAIN MENU", width)
+    label_room = max(width - 8, 0)
+    for index, (number, label, description) in enumerate(MENU_ITEMS, start=1):
+        active = selected == index
+        marker = ">" if active else " "
+        number_text = f"{number:>2}"
+        if show_descriptions:
+            label_text = f"{label:<{label_width}}"
+        else:
+            label_text = _fit_label(label, label_room)
+
+        if active:
+            line = f"  {C.BOLD}{C.ACCENT}{marker} {number_text}  {label_text}{C.RESET}"
+        else:
+            line = (
+                f"  {C.MUTED}{marker}{C.RESET} {C.TEXT}{number_text}{C.RESET}"
+                f"  {label_text}"
+            )
+        if show_descriptions:
+            line += f"{C.ACCENT if active else C.MUTED}{description}{C.RESET}"
+        print(line)
+    print(f"  {C.BORDER}{rule}{C.RESET}")
+
+
+def print_selected(choice: str) -> None:
+    """Echo the chosen menu entry so the active option is unmistakable."""
+    C = _colors()
+    try:
+        index = int(choice)
+    except (TypeError, ValueError):
+        return
+    if not 1 <= index <= len(MENU_ITEMS):
+        return
+    number, label, _ = MENU_ITEMS[index - 1]
+    print(
+        f"  {C.ACCENT}>{C.RESET} {C.BOLD}{label}{C.RESET}"
+        f" {C.MUTED}({number}){C.RESET}"
+    )
 
 
 def show_credits() -> None:
