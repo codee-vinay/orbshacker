@@ -8,7 +8,15 @@ import subprocess
 import time
 
 from . import config
-from .ui import Colors, print_color, print_banner, print_menu, show_credits
+from .ui import (
+    Colors,
+    _colors,
+    print_color,
+    print_banner,
+    print_menu,
+    print_selected,
+    show_credits,
+)
 from .faker import GameFaker, manual_mode
 from .discord_db import DiscordGamesDB, database_mode
 from .steam import steam_quest_mode
@@ -65,7 +73,12 @@ def main() -> None:
                     print_color(f"   Active Database: {db.source} ({len(db.games)} games)", Colors.GRAY)
 
                 print_menu()
-                choice = input(f"{Colors.BOLD}Select option{Colors.RESET} [1-5]: ").strip()
+                C = _colors()
+                choice = input(
+                    f"{C.BOLD}{C.ACCENT}Select option{C.RESET}"
+                    f" {C.MUTED}[1-5]{C.RESET}: "
+                ).strip()
+                print_selected(choice)
 
                 if choice == '1':
                     database_mode(db, faker)

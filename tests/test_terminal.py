@@ -283,11 +283,12 @@ class TestBannerNarrowWidth(unittest.TestCase):
         self.assertIn("ORBSHACKER", "".join(visible))
 
     def test_banner_full_on_wide(self):
-        """Full banner used when console width is sufficient."""
+        """Premium header used when console width is sufficient."""
         with patch("orbshacker.ui.get_console_width", return_value=120), \
                 patch("orbshacker.ui._get_vt_cached", return_value=False):
             output = _capture_stdout(print_banner)
-        self.assertIn("|     | __  | __  |", output)
+        self.assertIn("O R B S H A C K E R", output)
+        self.assertIn("DESKTOP EXPERIENCE", output)
         self.assertIn("Developer:", output)
 
     def test_banner_compact_every_line_fits_40_columns(self):
@@ -369,10 +370,11 @@ class TestBannerInformation(unittest.TestCase):
             self.assertNotIn("{config.", output)
             self.assertNotIn("{Colors.", output)
 
-    def test_banner_keeps_ascii_art_on_wide_terminals(self):
+    def test_banner_keeps_wordmark_header_on_wide_terminals(self):
         output = _strip_ansi(self._render(120))
-        self.assertIn("_____", output)
-        self.assertIn("|_____|", output)
+        self.assertIn("O R B S H A C K E R", output)
+        self.assertIn("DESKTOP EXPERIENCE", output)
+        self.assertIn("+-", output)
 
     def test_banner_remains_visible_when_width_is_zero(self):
         """A zero reported width falls back instead of silencing the banner."""
@@ -481,13 +483,21 @@ class TestMenuAndPromptFallback(unittest.TestCase):
         self.assertNotIn("\x1b[", output)
         self.assertIn("MAIN MENU", output)
         for option in (
-            "1. Search Discord database (Official API)",
-            "2. Manual mode (custom executable)",
-            "3. Steam Quest Mode",
-            "4. Credits & Info",
-            "5. Exit",
+            "1  Search Discord database",
+            "2  Manual mode",
+            "3  Steam Quest Mode",
+            "4  Credits & Info",
+            "5  Exit",
         ):
             self.assertIn(option, output)
+        for description in (
+            "Official API catalogue",
+            "Custom executable",
+            "AppID manifests",
+            "About this build",
+            "Close Orbshacker",
+        ):
+            self.assertIn(description, output)
 
     def test_ask_confirm_vt_disabled_prompt_and_accepts_yes(self):
         """Prompt is plain text and a 'y' answer returns True."""
@@ -731,6 +741,76 @@ class TestShowCreditsContent(unittest.TestCase):
         self.assertNotIn("\x1b[", self._render())
 
 
+
+
+class TestMainPromptVtAwareness(unittest.TestCase):
+    """Stage 3: selection prompt VT-awareness tests."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _get_prompt(self, vt=False):
+        """Capture the input prompt that main.py would produce."""
+        seen = {"prompt": None}
+
+        def fake_input(prompt=""):
+            seen["prompt"] = prompt
+            return "3"
+
+        with patch("orbshacker.ui._get_vt_cached", return_value=vt),                 patch("builtins.input", fake_input):
+            C = ui._colors()
+            prompt = f"{C.BOLD}{C.ACCENT}Select option{C.RESET} {C.MUTED}[1-5]{C.RESET}: "
+            result = fake_input(prompt)
+            return seen["prompt"], result
+
+    def test_vt_enabled_prompt_contains_ansi_styling(self):
+        """VT-enabled prompt contains the intended cyan/bold styling."""
+        prompt, _ = self._get_prompt(vt=True)
+        self.assertIn("[", prompt, "VT-enabled prompt must contain ANSI escapes")
+        self.assertIn(Colors.CYAN, prompt, "VT-enabled prompt must use CYAN color")
+        self.assertIn(Colors.BOLD, prompt, "VT-enabled prompt must use BOLD")
+
+    def test_vt_disabled_prompt_has_zero_esc_bytes(self):
+        """VT-disabled prompt contains zero ESC bytes."""
+        prompt, _ = self._get_prompt(vt=False)
+        self.assertNotIn("[", prompt, "VT-disabled prompt must not contain ESC bytes")
+        self.assertIn("Select option", prompt)
+        self.assertIn("[1-5]", prompt)
+        self.assertTrue(prompt.endswith(": "), f"Prompt must end with ': ', got: {prompt!r}")
+
+    def test_prompt_text_identical_after_ansi_stripping(self):
+        """Prompt text is identical in both modes after ANSI stripping."""
+        prompt_vt, _ = self._get_prompt(vt=True)
+        prompt_no_vt, _ = self._get_prompt(vt=False)
+        stripped_vt = re.sub(r"\[[0-9;]*m", "", prompt_vt)
+        self.assertEqual(stripped_vt, prompt_no_vt,
+                         "VT and non-VT prompts must match after stripping")
+
+    def test_numeric_input_behavior_unchanged(self):
+        """Numeric input behavior remains unchanged in both modes."""
+        # VT-enabled
+        seen_vt = {"choice": None}
+        def fake_input_vt(prompt=""):
+            seen_vt["choice"] = prompt
+            return "3"
+        with patch("orbshacker.ui._get_vt_cached", return_value=True),                 patch("builtins.input", fake_input_vt):
+            C = ui._colors()
+            prompt = f"{C.BOLD}{C.ACCENT}Select option{C.RESET} {C.MUTED}[1-5]{C.RESET}: "
+            fake_input_vt(prompt)
+            self.assertIn("Select option", seen_vt["choice"])
+            self.assertIn("[1-5]", seen_vt["choice"])
+
+        # VT-disabled
+        seen_no_vt = {"choice": None}
+        def fake_input_no_vt(prompt=""):
+            seen_no_vt["choice"] = prompt
+            return "3"
+        with patch("orbshacker.ui._get_vt_cached", return_value=False),                 patch("builtins.input", fake_input_no_vt):
+            C = ui._colors()
+            prompt = f"{C.BOLD}{C.ACCENT}Select option{C.RESET} {C.MUTED}[1-5]{C.RESET}: "
+            fake_input_no_vt(prompt)
+            self.assertIn("Select option", seen_no_vt["choice"])
+            self.assertIn("[1-5]", seen_no_vt["choice"])
 class _OneArgKernel32:
     """kernel32 stand-in that refuses a one-argument GetConsoleMode call."""
 
@@ -911,6 +991,310 @@ class TestStage1Acceptance(unittest.TestCase):
             + chr(13) + ansi + "96m" + " " * 9 + chr(13)
         )
         self.assertEqual(output, expected)
+
+
+# ── Stage 3: premium terminal theme ─────────────────────────────────────────
+
+
+class TestPremiumPalette(unittest.TestCase):
+    """The theme exposes semantic roles without breaking existing names."""
+
+    def test_semantic_aliases_reuse_existing_colours(self):
+        self.assertEqual(Colors.ACCENT, Colors.CYAN)
+        self.assertEqual(Colors.SECONDARY, Colors.MAGENTA)
+        self.assertEqual(Colors.SUCCESS, Colors.GREEN)
+        self.assertEqual(Colors.WARNING, Colors.YELLOW)
+        self.assertEqual(Colors.ERROR, Colors.RED)
+        self.assertEqual(Colors.INFO, Colors.CYAN)
+        self.assertEqual(Colors.MUTED, Colors.GRAY)
+        self.assertEqual(Colors.TEXT, Colors.WHITE)
+        self.assertEqual(Colors.BORDER, Colors.GRAY)
+
+    def test_plain_palette_has_no_escape_sequences(self):
+        for name in (
+            "RESET", "BOLD", "DIM", "RED", "GREEN", "YELLOW", "BLUE",
+            "MAGENTA", "CYAN", "WHITE", "GRAY", "ACCENT", "SECONDARY",
+            "SUCCESS", "WARNING", "ERROR", "INFO", "MUTED", "TEXT", "BORDER",
+        ):
+            self.assertEqual(getattr(ui._NoColors, name), "", name)
+
+
+class TestPremiumBanner(unittest.TestCase):
+    """Wide header identity, colouring and width safety."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _render(self, width, vt=False):
+        with patch("orbshacker.ui.get_console_width", return_value=width), \
+                patch("orbshacker.ui._get_vt_cached", return_value=vt):
+            return _capture_stdout(print_banner)
+
+    def test_wide_header_shows_wordmark_tagline_status_and_version(self):
+        output = self._render(100)
+        self.assertIn("O R B S H A C K E R", output)
+        self.assertIn("DESKTOP EXPERIENCE", output)
+        self.assertIn("READY", output)
+        self.assertIn(config.VERSION, output)
+
+    def test_wide_header_is_coloured_when_vt_enabled(self):
+        output = self._render(100, vt=True)
+        visible = _strip_ansi(output)
+        self.assertIn("\x1b[", output)
+        self.assertIn("O R B S H A C K E R", visible)
+        self.assertIn("READY", visible)
+        self.assertIn(Colors.CYAN, output)
+        self.assertIn(Colors.GREEN, output)
+
+    def test_wide_header_never_exceeds_its_box_or_the_terminal(self):
+        for width in (64, 72, 100, 200):
+            output = self._render(width, vt=True)
+            limit = min(width, ui._BANNER_ADVANCED_WIDTH)
+            for line in output.split("\n"):
+                visible = _strip_ansi(line)
+                if visible.strip():
+                    self.assertLessEqual(len(visible), limit, (width, visible))
+
+    def test_narrow_terminal_uses_compact_header_without_status_chip(self):
+        output = self._render(40)
+        self.assertIn("ORBSHACKER", output)
+        self.assertNotIn("O R B S H A C K E R", output)
+        self.assertNotIn("READY", output)
+
+    def test_metadata_rows_are_aligned(self):
+        visible = _strip_ansi(self._render(100))
+        self.assertIn("  Developer:  ", visible)
+        self.assertIn("  Version:    ", visible)
+        self.assertIn("  Database:   ", visible)
+
+    def test_banner_remains_ascii_only(self):
+        for width in (40, 100):
+            for vt in (False, True):
+                self.assertTrue(self._render(width, vt=vt).isascii(), (width, vt))
+
+
+class TestPremiumMenu(unittest.TestCase):
+    """Menu hierarchy, selected-row visibility and width behaviour."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _render(self, width=80, selected=None, vt=False):
+        with patch("orbshacker.ui.get_console_width", return_value=width), \
+                patch("orbshacker.ui._get_vt_cached", return_value=vt):
+            return _capture_stdout(ui.print_menu, selected)
+
+    def test_rows_pair_each_option_with_its_description(self):
+        visible = _strip_ansi(self._render(80))
+        pairs = (
+            ("Search Discord database", "Official API catalogue"),
+            ("Manual mode", "Custom executable"),
+            ("Steam Quest Mode", "AppID manifests"),
+            ("Credits & Info", "About this build"),
+            ("Exit", "Close Orbshacker"),
+        )
+        for label, description in pairs:
+            row = next(line for line in visible.split("\n") if label in line)
+            self.assertIn(description, row)
+
+    def test_selected_row_is_marked_once(self):
+        visible = _strip_ansi(self._render(80, selected=3))
+        pointer_rows = [line for line in visible.split("\n") if ">" in line]
+        self.assertEqual(len(pointer_rows), 1, visible)
+        self.assertIn("Steam Quest Mode", pointer_rows[0])
+
+    def test_selected_row_is_accented_when_vt_enabled(self):
+        output = self._render(80, selected=3, vt=True)
+        visible = _strip_ansi(output)
+        row = next(line for line in visible.split("\n") if "Steam Quest Mode" in line)
+        self.assertIn(">", row)
+        self.assertIn("\x1b[", output)
+        self.assertIn(Colors.CYAN, output)
+
+    def test_descriptions_are_dropped_when_space_is_tight(self):
+        visible = _strip_ansi(self._render(40))
+        self.assertIn("Search Discord database", visible)
+        self.assertNotIn("Official API catalogue", visible)
+
+    def test_menu_never_exceeds_the_terminal_width(self):
+        for width in (12, 20, 40, 56, 80, 120):
+            visible = _strip_ansi(self._render(width))
+            self.assertIn("MAIN MENU", visible)
+            for line in visible.split("\n"):
+                self.assertLessEqual(len(line), width, (width, line))
+
+    def test_narrow_menu_keeps_numbers_visible(self):
+        visible = _strip_ansi(self._render(12))
+        for number in ("1", "2", "3", "4", "5"):
+            self.assertIn(number, visible)
+
+    def test_choice_echo_names_the_selected_option_once(self):
+        with patch("orbshacker.ui._get_vt_cached", return_value=False):
+            output = _capture_stdout(ui.print_selected, "3")
+        self.assertIn("Steam Quest Mode", output)
+        self.assertIn("(3)", output)
+        self.assertEqual(output.count("Steam Quest Mode"), 1)
+
+    def test_choice_echo_ignores_invalid_input(self):
+        with patch("orbshacker.ui._get_vt_cached", return_value=False):
+            for choice in ("", "0", "6", "x", "1.5"):
+                self.assertEqual(_capture_stdout(ui.print_selected, choice), "")
+
+
+class TestStatusBadges(unittest.TestCase):
+    """Consistent success, warning, error, info and update treatments."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _print(self, text, color=Colors.WHITE, bold=False, vt=True):
+        with patch("orbshacker.ui._get_vt_cached", return_value=vt), \
+                patch("builtins.print") as mock_print:
+            print_color(text, color, bold=bold)
+        return "".join(str(call.args[0]) for call in mock_print.call_args_list)
+
+    def test_known_prefixes_render_as_badges(self):
+        cases = (
+            ("[OK]", "OK", Colors.GREEN),
+            ("[!]", "WARN", Colors.YELLOW),
+            ("[ERROR]", "ERR", Colors.RED),
+            ("[*]", "INFO", Colors.CYAN),
+            ("[UPDATE]", "UPDATE", Colors.MAGENTA),
+        )
+        for prefix, label, colour in cases:
+            with self.subTest(prefix=prefix):
+                output = self._print(prefix + " message")
+                self.assertIn(label, output)
+                self.assertIn(colour, output)
+                self.assertIn("message", output)
+                self.assertNotIn(prefix, output)
+
+    def test_plain_mode_preserves_the_original_prefix(self):
+        self.assertEqual(self._print("[OK] done", Colors.GREEN, vt=False), "[OK] done")
+
+    def test_unprefixed_messages_keep_their_colour_and_bold(self):
+        output = self._print("plain", Colors.CYAN, bold=True)
+        self.assertIn("\x1b[1m\x1b[96m", output)
+        self.assertIn("plain", output)
+
+    def test_unknown_prefixes_are_left_alone(self):
+        output = self._print("[FAIL] nope", Colors.RED)
+        self.assertIn("[FAIL] nope", output)
+
+
+class TestPremiumPromptAndTitle(unittest.TestCase):
+    """Prompt styling and muted box borders."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def test_confirm_prompt_is_styled_when_vt_enabled(self):
+        seen = {}
+
+        def fake_input(prompt=""):
+            seen["prompt"] = prompt
+            return ""
+
+        with patch("orbshacker.ui._get_vt_cached", return_value=True), \
+                patch("builtins.input", fake_input):
+            self.assertTrue(ui.ask_confirm("Create and launch?"))
+
+        self.assertIn("Create and launch?", seen["prompt"])
+        self.assertIn("[Y/n]", seen["prompt"])
+        self.assertIn("\x1b[", seen["prompt"])
+
+    def test_boxed_title_uses_muted_border_and_accent_title(self):
+        with patch("orbshacker.ui.get_console_width", return_value=80), \
+                patch("orbshacker.ui._get_vt_cached", return_value=True):
+            output = _capture_stdout(print_boxed_title, "Titles", width=30)
+
+        self.assertIn(Colors.GRAY + "+", output)
+        self.assertIn(Colors.BOLD + Colors.CYAN + "Titles", output)
+
+
+class TestLeadingNewlineBadges(unittest.TestCase):
+    """Status prefixes that follow layout newlines still render as badges."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _print(self, text, color=Colors.WHITE, bold=False, vt=True):
+        with patch("orbshacker.ui._get_vt_cached", return_value=vt), \
+                patch("builtins.print") as mock_print:
+            print_color(text, color, bold=bold)
+        return "".join(str(call.args[0]) for call in mock_print.call_args_list)
+
+    def test_all_prefixed_messages_render_badges(self):
+        cases = (
+            ("\n[OK] Setup complete!", "OK", Colors.GREEN),
+            ("\n[!] Operation cancelled", "WARN", Colors.YELLOW),
+            ("\n[ERROR] No games found", "ERR", Colors.RED),
+            ("\n[*] Loading games database...", "INFO", Colors.CYAN),
+            ("\n[UPDATE] Restarting...", "UPDATE", Colors.MAGENTA),
+        )
+        for text, label, colour in cases:
+            with self.subTest(text=text):
+                output = self._print(text, Colors.WHITE)
+                self.assertIn(label, output)
+                self.assertIn(colour, output)
+                self.assertTrue(output.startswith("\n"), repr(output))
+                prefix = text.lstrip("\n").split("] ", 1)[0] + "]"
+                self.assertNotIn(prefix, output, output)
+                body = text.lstrip("\n").split("] ", 1)[1]
+                self.assertIn(body, output)
+
+    def test_multiple_leading_newlines_are_preserved_exactly(self):
+        output = self._print("\n\n[!] Interrupted by user", Colors.YELLOW)
+        self.assertTrue(output.startswith("\n\n"), repr(output))
+        self.assertEqual(output.count("\n"), 2, repr(output))
+        self.assertIn("WARN", output)
+        self.assertIn("Interrupted by user", output)
+
+    def test_single_leading_newline_adds_no_extra_newline(self):
+        output = self._print("\n[OK] Done", Colors.GREEN)
+        self.assertEqual(output.count("\n"), 1, repr(output))
+
+    def test_plain_mode_keeps_the_complete_original_message(self):
+        output = self._print("\n[ERROR] No results found", Colors.RED, vt=False)
+        self.assertEqual(output, "\n[ERROR] No results found")
+
+
+class TestBadgeBoldAndColourSemantics(unittest.TestCase):
+    """Badges keep the caller's bold intent and explicit body colours."""
+
+    def setUp(self):
+        ui._reset_vt_cache()
+
+    def _print(self, text, color=Colors.WHITE, bold=False, vt=True):
+        with patch("orbshacker.ui._get_vt_cached", return_value=vt), \
+                patch("builtins.print") as mock_print:
+            print_color(text, color, bold=bold)
+        return "".join(str(call.args[0]) for call in mock_print.call_args_list)
+
+    def test_bold_body_is_bold(self):
+        output = self._print("[OK] Ready", Colors.GREEN, bold=True)
+        self.assertIn("\x1b[1m\x1b[92mOK", output)
+        self.assertIn("\x1b[1m\x1b[92mReady", output)
+
+    def test_non_bold_body_stays_regular_weight(self):
+        output = self._print("[OK] Ready", Colors.GREEN, bold=False)
+        self.assertIn("\x1b[92mReady", output)
+        self.assertNotIn("\x1b[1m\x1b[92mReady", output)
+
+    def test_warning_badge_keeps_explicit_error_body_colour(self):
+        output = self._print("[!] Failed to delete: locked", Colors.RED)
+        self.assertIn("\x1b[1m\x1b[93mWARN", output)
+        self.assertIn("\x1b[91mFailed to delete: locked", output)
+
+    def test_error_badge_keeps_its_own_colour_with_mixed_call(self):
+        output = self._print("[ERROR] Download failed", Colors.YELLOW, bold=True)
+        self.assertIn("\x1b[1m\x1b[91mERR", output)
+        self.assertIn("\x1b[1m\x1b[93mDownload failed", output)
+
+    def test_badge_and_body_text_are_not_duplicated(self):
+        output = self._print("[UPDATE] Restarting...", Colors.CYAN)
+        self.assertEqual(output.count("UPDATE"), 1)
+        self.assertEqual(output.count("Restarting..."), 1)
 
 
 if __name__ == "__main__":
