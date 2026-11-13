@@ -333,3 +333,257 @@ def test_fresh_process_no_name_error_on_frozen_import():
         assert "FROZEN_IMPORT_OK" in result.stdout, (
             f"FAIL: Expected FROZEN_IMPORT_OK in stdout, got: {result.stdout}",
         )
+
+# -- Stage 2: configuration safety -------------------------------------------
+
+
+@pytest.fixture()
+def settings_warnings():
+    """Give each test a clean, isolated warning list."""
+    config_module.SETTINGS_WARNINGS.clear()
+    yield config_module.SETTINGS_WARNINGS
+    config_module.SETTINGS_WARNINGS.clear()
+
+
+@pytest.mark.parametrize("value", [True, False, 1, 0])
+def test_auto_delete_accepts_booleans_and_integer_flags(settings_warnings, value):
+    assert config_module._coerce_bool("AUTO_DELETE", value) is bool(value)
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("true", True),
+        ("TRUE", True),
+        ("Yes", True),
+        ("1", True),
+        (" true ", True),
+        ("false", False),
+        ("FALSE", False),
+        ("no", False),
+        ("0", False),
+        (" false ", False),
+    ],
+)
+def test_auto_delete_parses_supported_strings(settings_warnings, value, expected):
+    assert config_module._coerce_bool("AUTO_DELETE", value) is expected
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize("value", ["", "maybe", None, 2, 3.5, [], {}, ["false"]])
+def test_auto_delete_rejects_unsupported_values_with_one_warning(settings_warnings, value):
+    assert config_module._coerce_bool("AUTO_DELETE", value) is False
+    assert len(settings_warnings) == 1
+    assert "AUTO_DELETE" in settings_warnings[0]
+
+
+def test_auto_delete_string_false_regression(settings_warnings):
+    """Regression: a quoted "false" previously enabled destructive cleanup."""
+    assert config_module._coerce_bool("AUTO_DELETE", "false") is False
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize("value", [15, 1, 1440, "30", " 45 ", "1", "1440"])
+def test_timer_minutes_accepts_integers_and_digit_strings(settings_warnings, value):
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == int(value)
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(0, 1), (-5, 1), (1441, 1440), (99999, 1440), ("0", 1), ("5000", 1440)],
+)
+def test_timer_minutes_clamps_out_of_range_values(settings_warnings, value, expected):
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == expected
+    assert len(settings_warnings) == 1
+    assert "TIMER_MINUTES" in settings_warnings[0]
+
+
+@pytest.mark.parametrize("value", [True, False, "abc", "", "3.5", None, [], 3.5])
+def test_timer_minutes_rejects_unsupported_values(settings_warnings, value):
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == 15
+    assert len(settings_warnings) == 1
+    assert "TIMER_MINUTES" in settings_warnings[0]
+
+
+def test_timer_minutes_string_regression(settings_warnings):
+    """Regression: a quoted minutes value used to break TimerApp construction."""
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", "30") == 30
+    assert settings_warnings == []
+
+
+def test_chosen_folder_accepts_strings_and_path_objects(settings_warnings, tmp_path):
+    target = tmp_path / "Games"
+    default = Path.home() / "Desktop"
+    assert config_module._coerce_folder("CHOSEN_FOLDER", str(target), default) == target
+    assert config_module._coerce_folder("CHOSEN_FOLDER", target, default) == target
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize("value", ["Desktop", "", "   "])
+def test_chosen_folder_desktop_aliases_resolve_to_desktop(settings_warnings, value):
+    result = config_module._coerce_folder("CHOSEN_FOLDER", value, Path("/fallback"))
+    assert result == Path.home() / "Desktop"
+    assert settings_warnings == []
+
+
+@pytest.mark.parametrize("value", [None, 42, [], {}])
+def test_chosen_folder_rejects_unsupported_types(settings_warnings, value):
+    fallback = Path.home() / "Desktop"
+    assert config_module._coerce_folder("CHOSEN_FOLDER", value, fallback) == fallback
+    assert len(settings_warnings) == 1
+    assert "CHOSEN_FOLDER" in settings_warnings[0]
+
+
+def test_warn_deduplicates_identical_messages(settings_warnings):
+    config_module._warn("[!] duplicated")
+    config_module._warn("[!] duplicated")
+    assert settings_warnings == ["[!] duplicated"]
+
+
+def test_normalised_settings_from_untyped_mapping(settings_warnings, monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "_user",
+        {"AUTO_DELETE": "false", "TIMER_MINUTES": "30", "CHOSEN_FOLDER": "Desktop"},
+    )
+    values = config_module._normalised_settings()
+    assert values["AUTO_DELETE"] is False
+    assert values["TIMER_MINUTES"] == 30
+    assert values["CHOSEN_FOLDER"] == Path.home() / "Desktop"
+    assert settings_warnings == []
+
+
+def test_normalised_settings_reports_each_invalid_key(settings_warnings, monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "_user",
+        {"AUTO_DELETE": "maybe", "TIMER_MINUTES": "abc", "CHOSEN_FOLDER": None},
+    )
+    values = config_module._normalised_settings()
+    assert values["AUTO_DELETE"] is False
+    assert values["TIMER_MINUTES"] == 15
+    assert values["CHOSEN_FOLDER"] == Path.home() / "Desktop"
+    assert len(settings_warnings) == 3
+    joined = " ".join(settings_warnings)
+    for key in ("AUTO_DELETE", "TIMER_MINUTES", "CHOSEN_FOLDER"):
+        assert key in joined
+
+
+def test_malformed_appdata_json_records_warning(tmp_path, monkeypatch, settings_warnings):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    appdata = tmp_path / "Orbshacker" / "settings.json"
+    appdata.parent.mkdir(parents=True)
+    appdata.write_text("{not valid json", encoding="utf-8")
+    exe = tmp_path / "orbshacker.exe"
+    exe.touch()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    config_module._load_settings()
+    assert any("Malformed configuration found at" in w for w in settings_warnings)
+
+
+def test_malformed_dev_legacy_json_records_warning(tmp_path, settings_warnings):
+    project = tmp_path / "project"
+    (project / "orbshacker").mkdir(parents=True)
+    (project / "settings.json").write_text("{bad", encoding="utf-8")
+    with patch("orbshacker.config.__file__", str(project / "orbshacker" / "config.py")):
+        config_module._load_settings()
+    assert any("Malformed legacy configuration found at" in w for w in settings_warnings)
+
+
+def _patch_main_for_startup(monkeypatch):
+    """Make main() exit immediately after one menu choice, recording UI calls."""
+    from orbshacker import main as main_module
+
+    events = []
+    monkeypatch.setattr(main_module, "auto_update", lambda: events.append(("update", "")))
+    monkeypatch.setattr(
+        main_module,
+        "print_color",
+        lambda text, *args, **kwargs: events.append(("color", text)),
+    )
+    monkeypatch.setattr(main_module, "print_banner", lambda: events.append(("banner", "")))
+    monkeypatch.setattr(main_module, "print_menu", lambda: events.append(("menu", "")))
+    monkeypatch.setattr(main_module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(main_module.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "5")
+
+    class FakeDB:
+        source = "test-db"
+        games = []
+
+        def ensure_loaded(self):
+            pass
+
+    class FakeFaker:
+        def cleanup(self):
+            events.append(("cleanup", ""))
+
+    monkeypatch.setattr(main_module, "DiscordGamesDB", FakeDB)
+    monkeypatch.setattr(main_module, "GameFaker", FakeFaker)
+    return main_module, events
+
+
+def test_main_prints_settings_warnings_before_banner(monkeypatch, settings_warnings):
+    main_module, events = _patch_main_for_startup(monkeypatch)
+    monkeypatch.setattr(config_module, "SETTINGS_WARNINGS", ["[!] Test settings warning"])
+    main_module.main()
+    warning_index = next(
+        i
+        for i, event in enumerate(events)
+        if event[0] == "color" and "Test settings warning" in event[1]
+    )
+    update_index = next(i for i, event in enumerate(events) if event[0] == "update")
+    banner_index = next(i for i, event in enumerate(events) if event[0] == "banner")
+    assert warning_index < update_index < banner_index
+    shown = [e for e in events if e[0] == "color" and "Test settings warning" in e[1]]
+    assert len(shown) == 1
+    assert ("cleanup", "") in events
+
+
+def test_main_starts_when_warning_display_fails(monkeypatch):
+    class BrokenWarnings:
+        def __iter__(self):
+            raise RuntimeError("warning display failure")
+
+    main_module, events = _patch_main_for_startup(monkeypatch)
+    monkeypatch.setattr(config_module, "SETTINGS_WARNINGS", BrokenWarnings())
+    main_module.main()
+    assert ("banner", "") in events
+    assert ("cleanup", "") in events
+
+
+@pytest.mark.parametrize(
+    "value, expected, warned",
+    [
+        ("-5", 1, True),
+        ("+30", 30, False),
+        (" +30 ", 30, False),
+        ("-1441", 1, True),
+        ("+5000", 1440, True),
+    ],
+)
+def test_timer_minutes_accepts_signed_integer_strings(settings_warnings, value, expected, warned):
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == expected
+    if warned:
+        assert len(settings_warnings) == 1
+        assert "TIMER_MINUTES" in settings_warnings[0]
+    else:
+        assert settings_warnings == []
+
+
+@pytest.mark.parametrize("value", ["-", "+", "--5", "+-5", "-3.5", "1e3"])
+def test_timer_minutes_rejects_malformed_signed_strings(settings_warnings, value):
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == 15
+    assert len(settings_warnings) == 1
+    assert "TIMER_MINUTES" in settings_warnings[0]
+
+
+@pytest.mark.parametrize("value", ["\u00b2", "\u00b9", "-\u00b2"])
+def test_timer_minutes_rejects_superscript_digits(settings_warnings, value):
+    """Regression: isdigit() accepted characters int() cannot parse."""
+    assert config_module._coerce_timer_minutes("TIMER_MINUTES", value) == 15
+    assert len(settings_warnings) == 1
+    assert "TIMER_MINUTES" in settings_warnings[0]

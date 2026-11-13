@@ -16,8 +16,21 @@ from .updater import auto_update
 from .errors import DatabaseLoadError
 
 
+def _show_settings_warnings() -> None:
+    """Print configuration warnings collected at import, without blocking startup."""
+    try:
+        for message in config.SETTINGS_WARNINGS:
+            print_color(message, Colors.YELLOW)
+    except Exception:
+        # A display problem must never prevent the application from starting.
+        pass
+
+
 def main() -> None:
     """Main application loop."""
+    # Report configuration problems before the updater can exit or change flow.
+    _show_settings_warnings()
+
     try:
         auto_update()
     except Exception:

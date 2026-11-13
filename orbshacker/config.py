@@ -97,7 +97,18 @@ def _is_valid_json_file(path: Path) -> bool:
     except Exception:
         return False
 
+SETTINGS_WARNINGS: list[str] = []
+
+
+def _warn(message: str) -> None:
+    """Record a user-facing configuration warning (deduplicated per load)."""
+    if message not in SETTINGS_WARNINGS:
+        SETTINGS_WARNINGS.append(message)
+
+
 def _load_settings():
+    # Each load reports only the problems found during that load.
+    SETTINGS_WARNINGS.clear()
     # 1. Try loading embedded settings from the executable
     embedded = _load_embedded_settings()
     if embedded is not None:
@@ -116,14 +127,12 @@ def _load_settings():
                 if settings is not None:
                     return settings
             else:
-                # Malformed AppData -- preserve it, warn user, use in-memory defaults
-                try:
-                    print_color(
-                        "[!] Malformed configuration found at " + str(appdata_path) + ". Using in-memory defaults.",
-                        Colors.YELLOW,
-                    )
-                except Exception:
-                    pass
+                # Malformed AppData -- preserve it, warn the user, use defaults
+                _warn(
+                    "[!] Malformed configuration found at "
+                    + str(appdata_path)
+                    + ". Using in-memory defaults."
+                )
                 # Fall through to below (legacy or defaults)
 
         # 2b. AppData either None, invalid, or we fell through -- inspect legacy exe-dir settings.json
@@ -140,14 +149,12 @@ def _load_settings():
                 # Migration failed (dst existed or error) -- preserve legacy file
                 # _migrate_json_if_safe handles its own temp file cleanup
             else:
-                # Malformed legacy config -- preserve it, warn user, use in-memory defaults
-                try:
-                    print_color(
-                        "[!] Malformed legacy configuration found at " + str(legacy_json_path) + ". Using in-memory defaults.",
-                        Colors.YELLOW,
-                    )
-                except Exception:
-                    pass
+                # Malformed legacy config -- preserve it, warn the user, use defaults
+                _warn(
+                    "[!] Malformed legacy configuration found at "
+                    + str(legacy_json_path)
+                    + ". Using in-memory defaults."
+                )
                 # Fall through to defaults below
         else:
             # No legacy json beside exe -- create defaults in AppData only (not beside exe)
@@ -168,14 +175,8 @@ def _load_settings():
                     except Exception:
                         pass
                 except Exception:
-                    # AppData unavailable or unwritable -- warn user, fall through to defaults
-                    try:
-                        print_color(
-                            "[!] AppData is unavailable or unwritable. Using in-memory defaults.",
-                            Colors.YELLOW,
-                        )
-                    except Exception:
-                        pass
+                    # AppData unavailable or unwritable -- warn, fall through to defaults
+                    _warn("[!] AppData is unavailable or unwritable. Using in-memory defaults.")
             # Fall through to defaults below
         # In frozen mode, fall through to dev-mode settings.json check below
         # (this path is only reached if somehow not frozen, as a fallback)
@@ -219,10 +220,11 @@ def _load_settings():
         else:
             # Malformed legacy config - preserve it, use in-memory defaults
             # Don't import settings module - return in-memory defaults instead
-            try:
-                print("[!] Malformed legacy configuration found at " + str(legacy_json_path) + ". Using in-memory defaults.")
-            except Exception:
-                pass
+            _warn(
+                "[!] Malformed legacy configuration found at "
+                + str(legacy_json_path)
+                + ". Using in-memory defaults."
+            )
             # Return in-memory defaults
             return {
                 "CHOSEN_FOLDER": _DEFAULT_DESKTOP,
@@ -367,6 +369,108 @@ def _get(name: str, default: T) -> T:
     return cast(T, getattr(_user, name, default))
 
 
+# ── Settings normalisation ─────────────────────────────────────────────────────
+# Settings come from JSON or settings.py, so their types are not guaranteed by
+# the loader. These helpers make each value safe to consume and record a warning
+# instead of silently misbehaving when a value is unusable.
+
+MIN_TIMER_MINUTES = 1
+MAX_TIMER_MINUTES = 1440
+
+
+def _describe(value: object) -> str:
+    """Return a short, safe representation of a rejected setting value."""
+    text = repr(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+def _coerce_bool(name: str, value: object, default: bool = False) -> bool:
+    """Coerce a setting to a real ``bool``.
+
+    Accepts booleans, integer 0/1, and the case-insensitive strings
+    ``true``/``false``/``yes``/``no``/``1``/``0``. Anything else falls back to
+    *default* and records one warning naming the setting.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("true", "yes", "1"):
+            return True
+        if token in ("false", "no", "0"):
+            return False
+    _warn(f"[!] Invalid {name} value {_describe(value)}; using {default}.")
+    return default
+
+
+def _coerce_timer_minutes(name: str, value: object, default: int = 15) -> int:
+    """Coerce a setting to an ``int`` in ``1..1440`` minutes.
+
+    Integers and optionally signed digit strings (``"30"``, ``"+30"``,
+    ``"-5"``) are accepted; out-of-range numbers are clamped with a warning.
+    Booleans, decimals, non-numeric strings and other types fall back to
+    *default* with a warning.
+    """
+    if isinstance(value, bool):
+        minutes = None
+    elif isinstance(value, int):
+        minutes = value
+    elif isinstance(value, str):
+        token = value.strip()
+        digits = token[1:] if token[:1] in ("+", "-") else token
+        minutes = None
+        # ``isdigit()`` accepts characters ``int()`` cannot parse (e.g. "\u00b2");
+        # ``isdecimal()`` matches what ``int()`` accepts, and the try guards the
+        # remaining conversion limits.
+        if digits.isdecimal():
+            try:
+                minutes = int(token)
+            except ValueError:
+                minutes = None
+    else:
+        minutes = None
+
+    if minutes is None:
+        _warn(f"[!] Invalid {name} value {_describe(value)}; using {default} minutes.")
+        return default
+
+    clamped = min(max(minutes, MIN_TIMER_MINUTES), MAX_TIMER_MINUTES)
+    if clamped != minutes:
+        _warn(
+            f"[!] {name} value {minutes} is outside "
+            f"{MIN_TIMER_MINUTES}-{MAX_TIMER_MINUTES}; using {clamped} minutes."
+        )
+    return clamped
+
+
+def _coerce_folder(name: str, value: object, default: Path) -> Path:
+    """Coerce a setting to a ``Path``, preserving the existing resolution rules."""
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        if not value.strip() or value.strip() == "Desktop":
+            return Path.home() / "Desktop"
+        return Path(value)
+    _warn(f"[!] Invalid {name} value {_describe(value)}; using {default}.")
+    return default
+
+
+def _normalised_settings() -> dict:
+    """Return validated values for the user-editable settings."""
+    default_folder = Path.home() / "Desktop"
+    return {
+        "AUTO_DELETE": _coerce_bool("AUTO_DELETE", _get("AUTO_DELETE", False)),
+        "TIMER_MINUTES": _coerce_timer_minutes("TIMER_MINUTES", _get("TIMER_MINUTES", 15)),
+        "CHOSEN_FOLDER": _coerce_folder(
+            "CHOSEN_FOLDER",
+            _get("CHOSEN_FOLDER", str(default_folder)),
+            default_folder,
+        ),
+    }
+
+
 def _git_version() -> str | None:
     """Return the current git tag as a version string when available."""
     commands = [
@@ -463,17 +567,11 @@ SLEEP_SHORT        = 1.0
 SLEEP_LONG         = 2.0
 FAKE_EXE_DIR       = sanitize_relative_path(_get("FAKE_EXE_DIR", "Win64"))
 MAX_SEARCH_RESULTS = 20
-AUTO_DELETE        = _get("AUTO_DELETE",        False)
-TIMER_MINUTES      = _get("TIMER_MINUTES",      15)
+_effective_settings = _normalised_settings()
+
+AUTO_DELETE        = _effective_settings["AUTO_DELETE"]
+TIMER_MINUTES      = _effective_settings["TIMER_MINUTES"]
 STEAM_MANIFEST_PATH = _get("STEAM_MANIFEST_PATH", None)
 
-# Resolve CHOSEN_FOLDER as a Path object
-default_folder = str(Path.home() / "Desktop")
-chosen_folder_val = _get("CHOSEN_FOLDER", default_folder)
-if isinstance(chosen_folder_val, str):
-    if chosen_folder_val.strip() == "Desktop" or not chosen_folder_val.strip():
-        CHOSEN_FOLDER = Path.home() / "Desktop"
-    else:
-        CHOSEN_FOLDER = Path(chosen_folder_val)
-else:
-    CHOSEN_FOLDER = chosen_folder_val
+# CHOSEN_FOLDER is always a Path object
+CHOSEN_FOLDER = _effective_settings["CHOSEN_FOLDER"]
